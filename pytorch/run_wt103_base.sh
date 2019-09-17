@@ -4,9 +4,8 @@ if [[ $1 == 'train' ]]; then
     echo 'Run training...'
     python train.py \
         --cuda \
-        --data ../data/wikitext-103/ \
+        --data ../data/wikitext-103-sp/ \
         --dataset wt103 \
-        --adaptive \
         --n_layer 16 \
         --d_model 410 \
         --n_head 10 \
@@ -18,18 +17,19 @@ if [[ $1 == 'train' ]]; then
         --lr 0.00025 \
         --warmup_step 0 \
         --max_step 200000 \
-        --tgt_len 150 \
-        --mem_len 150 \
-        --eval_tgt_len 150 \
-        --batch_size 60 \
+        --tgt_len 200 \
+        --mem_len 200 \
+        --eval_tgt_len 200 \
+        --batch_size 68 \
         --multi_gpu \
-        --gpu0_bsz 4 \
+        --gpu0_bsz 12 \
         ${@:2}
 elif [[ $1 == 'eval' ]]; then
     echo 'Run evaluation...'
     python eval.py \
+        --renormalize \
         --cuda \
-        --data ../data/wikitext-103/ \
+        --data ../data/wikitext-103-sp/ \
         --dataset wt103 \
         --tgt_len 64 \
         --mem_len 640 \

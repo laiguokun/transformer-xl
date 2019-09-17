@@ -37,6 +37,8 @@ parser.add_argument('--no_log', action='store_true',
                     help='do not log the eval result')
 parser.add_argument('--same_length', action='store_true',
                     help='set same length attention with masking')
+parser.add_argument('--renormalize', action='store_true',
+                    help='renormlize for the sub-word model')
 args = parser.parse_args()
 assert args.ext_len >= 0, 'extended context length must be non-negative'
 
@@ -47,7 +49,7 @@ logging = get_logger(os.path.join(args.work_dir, 'log.txt'),
                      log_=not args.no_log)
 
 # Load dataset
-corpus = get_lm_corpus(args.data, args.dataset)
+corpus = get_lm_corpus(args.data, args.dataset, renormalize=args.renormalize, only_eval=True)
 ntokens = len(corpus.vocab)
 
 va_iter = corpus.get_iterator('valid', args.batch_size, args.tgt_len,
@@ -78,14 +80,21 @@ def evaluate(eval_iter):
     model.eval()
     total_len, total_loss = 0, 0.
     start_time = time.time()
+    cnt = 0
     with torch.no_grad():
         mems = tuple()
         for idx, (data, target, seq_len) in enumerate(eval_iter):
-            ret = model(data, target, *mems)
+            if type(target)==list:
+                ret = model.forward_renormalize(data, target, *mems)
+            else:
+                ret = model(data, target, *mems)
             loss, mems = ret[0], ret[1:]
             loss = loss.mean()
             total_loss += seq_len * loss.item()
             total_len += seq_len
+            cnt += 1
+            #if cnt > 10:
+            #    break
         total_time = time.time() - start_time
     logging('Time : {:.2f}s, {:.2f}ms/segment'.format(
             total_time, 1000 * total_time / (idx+1)))

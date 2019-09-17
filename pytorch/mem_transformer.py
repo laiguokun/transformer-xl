@@ -759,6 +759,36 @@ class MemTransformerLM(nn.Module):
         else:
             return [loss] + new_mems
 
+    def forward_renormalize(self, data, target, *mems):
+        # nn.DataParallel does not allow size(0) tensors to be broadcasted.
+        # So, have to initialize size(0) mems inside the model forward.
+        # Moreover, have to return new_mems to allow nn.DataParallel to piece
+        # them together.
+        if not mems: mems = self.init_mems()
+
+        target, next_word_batch = target
+
+        tgt_len = target.size(0)
+        hidden, new_mems = self._forward(data, mems=mems)
+
+        pred_hid = hidden[-tgt_len:]
+        if self.sample_softmax > 0 and self.training:
+            assert self.tie_weight
+            logit = sample_logits(self.word_emb,
+                self.out_layer.bias, target, pred_hid, self.sampler)
+            loss = -F.log_softmax(logit, -1)[:, :, 0]
+        else:
+            loss = self.crit.forward_renormalize(
+                pred_hid.view(-1, pred_hid.size(-1)), 
+                target.view(-1), 
+                next_word_batch.view(-1, next_word_batch.size(-1)))
+            loss = loss.view(tgt_len, -1)
+
+        if new_mems is None:
+            return [loss]
+        else:
+            return [loss] + new_mems
+
 if __name__ == '__main__':
     import argparse
 
