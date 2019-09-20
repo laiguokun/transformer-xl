@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from utils.vocabulary import Vocab
+from utils.renormalize import RenormalizeVocab, LMOrderedRenomalizeIterator
 
 class LMOrderedIterator(object):
     def __init__(self, data, bsz, bptt, device='cpu', ext_len=None):
@@ -60,75 +61,6 @@ class LMOrderedIterator(object):
 
     def __iter__(self):
         return self.get_fixlen_iter()
-
-
-class LMOrderedRenomalizeIterator(object):
-    def __init__(self, data, bsz, bptt, vocab, device='cpu', ext_len=None):
-        """
-            data -- LongTensor -- the LongTensor is strictly ordered
-        """
-        self.bsz = bsz
-        self.bptt = bptt
-        self.ext_len = ext_len if ext_len is not None else 0
-        self.device = device
-        self.vocab = vocab
-    
-        # Work out how cleanly we can divide the dataset into bsz parts.
-        self.n_step = data[0].size(0) // bsz
-
-        # Trim off any extra elements that wouldn't cleanly fit (remainders).
-        self.data = data[0].narrow(0, 0, self.n_step * bsz)
-
-        # Evenly divide the data across the bsz batches.
-        self.data = self.data.view(bsz, -1).t().contiguous().to(device)
-        
-        self.next_word = data[1]
-        self.end_mark = data[2].narrow(0, 0, self.n_step * bsz)
-        self.end_mark = self.end_mark.view(bsz, -1).t().contiguous()
-
-        # Number of mini-batches
-        self.n_batch = (self.n_step + self.bptt - 1) // self.bptt
-
-        self.head_vocab = vocab.head_vocab.view(1, 1, -1).expand(1, bsz, -1)
-
-    def get_batch(self, i, bptt=None):
-        if bptt is None: bptt = self.bptt
-        seq_len = min(bptt, self.data.size(0) - 1 - i)
-
-        end_idx = i + seq_len
-        beg_idx = max(0, i - self.ext_len)
-
-        data = self.data[beg_idx:end_idx]
-        target = self.data[i+1:i+1+seq_len]
-        next_word_batch = torch.zeros(target.size(0), target.size(1), len(self.vocab)).long()
-        for row in range(i, i+seq_len):
-            for col in range(self.bsz):
-                original_pos = col * self.data.size(0) + row 
-                next_word_batch[row - i][col][self.next_word[original_pos]] = 1
-        head_vocab = self.head_vocab.expand(target.size(0), self.bsz, -1)
-        end_mark = self.end_mark[i:i+seq_len].unsqueeze(-1)
-        head_vocab = head_vocab * end_mark
-        next_word_batch = next_word_batch | head_vocab
-        '''
-        print(data[:][9])
-        for row in range(i, i+seq_len):
-            for col in range(self.bsz):
-                if (next_word_batch[row - i][col][target[row-i][col]] == 0):
-                    print(row, col, i)
-                    assert False
-        '''
-        next_word_batch = next_word_batch.byte().to(self.device)
-        return data, [target, next_word_batch], seq_len      
-
-
-    def get_fixlen_iter(self, start=0):
-        
-        for i in range(start, self.data.size(0) - 1, self.bptt):
-            yield self.get_batch(i)
-
-    def __iter__(self):
-        return self.get_fixlen_iter()
-
 
 class LMShuffledIterator(object):
     def __init__(self, data, bsz, bptt, device='cpu', ext_len=None, shuffle=False):
@@ -244,11 +176,36 @@ class LMMultiFileIterator(LMShuffledIterator):
 
 
 class Corpus(object):
-    def __init__(self, path, dataset, only_eval=False, *args, **kwargs):
+    def __init__(self, path, dataset, renormalize=False, *args, **kwargs):
+        self.renormalize = renormalize
+        if self.renormalize:
+            self.get_renormalize_corpus(path, dataset, *args, **kwargs)
+        else:
+            self.get_corpus(path, dataset, *args, **kwargs)
+
+    def get_renormalize_corpus(self, path, dataset, *args, **kwargs):
+        self.dataset = dataset
+        add_eos = False
+        add_double_eos = False
+        if dataset in ['ptb', 'wt2', 'wt103']:
+            add_eos = True
+        elif dataset in ['lm1b']:
+            add_double_eos = True
+        kwargs['vocab_map_fn'] = os.path.join(path, 'vocab_map.txt')
+        kwargs['vocab_fn'] = os.path.join(path, 'vocab.txt')
+        kwargs['add_eos'] = add_eos
+        kwargs['add_double_eos'] = add_double_eos
+        self.vocab = RenormalizeVocab(**kwargs)
+        self.vocab.build_renormalize_vocab()
+        if dataset not in ['lm1b']:
+            self.valid = self.vocab.encode_file(os.path.join(path, 'valid.txt'), ordered=True)
+            self.test  = self.vocab.encode_file(os.path.join(path, 'test.txt'), ordered=True)
+        #torch.save(self.renormalize_vocab, renomalize_vocab_fn)
+
+
+    def get_train_corpus(self, path, dataset, *args, **kwargs):
         self.dataset = dataset
         self.vocab = Vocab(*args, **kwargs)
-        self.only_eval = only_eval
-
         if self.dataset in ['ptb', 'wt2', 'enwik8', 'text8']:
             self.vocab.count_file(os.path.join(path, 'train.txt'))
             self.vocab.count_file(os.path.join(path, 'valid.txt'))
@@ -263,9 +220,6 @@ class Corpus(object):
             train_paths = glob.glob(train_path_pattern)
             # the vocab will load from file when build_vocab() is called
         self.vocab.build_vocab()
-        self.renormalize = kwargs['renormalize']
-        if self.renormalize:
-            self.vocab.build_renormalize_vocab(path)
 
         if self.dataset in ['ptb', 'wt2', 'wt103']:
             if self.only_eval == False:
@@ -318,12 +272,12 @@ class Corpus(object):
         return data_iter
 
 
-def get_lm_corpus(datadir, dataset, renormalize=False, only_eval=False):
+def get_lm_corpus(datadir, dataset, renormalize=False):
     if renormalize:
         fn = os.path.join(datadir, 'renormalize_cache.pt')
     else:
         fn = os.path.join(datadir, 'cache.pt')
-    if os.path.exists(fn) and False:
+    if os.path.exists(fn):
         print('Loading cached dataset...')
         corpus = torch.load(fn)
     else:
@@ -336,16 +290,15 @@ def get_lm_corpus(datadir, dataset, renormalize=False, only_eval=False):
             kwargs['special'] = ['<eos>']
             kwargs['lower_case'] = True
         elif dataset == 'lm1b':
-            kwargs['special'] = []
+            kwargs['special'] = ['<S>']
             kwargs['lower_case'] = False
-            kwargs['vocab_file'] = os.path.join(datadir, '1b_word_vocab.txt')
+            kwargs['vocab_file'] = os.path.join(datadir, 'vocab_idx.txt')
         elif dataset in ['enwik8', 'text8']:
             pass
         kwargs['renormalize'] = renormalize
-        if only_eval:
-            kwargs['vocab_file'] = os.path.join(datadir, 'train-vocab.txt')
-        corpus = Corpus(datadir, dataset, only_eval=only_eval, **kwargs)
-        #torch.save(corpus, fn)
+        corpus = Corpus(datadir, dataset, **kwargs)
+        torch.save(corpus, fn)
+
 
     return corpus
 
@@ -358,7 +311,7 @@ if __name__ == '__main__':
                         choices=['ptb', 'wt2', 'wt103', 'lm1b', 'enwik8', 'text8'],
                         help='dataset name')
     args = parser.parse_args()
-    corpus = get_lm_corpus(args.datadir, args.dataset, renormalize=True, only_eval=True)
+    corpus = get_lm_corpus(args.datadir, args.dataset, renormalize=True)
     print('Vocab size : {}'.format(len(corpus.vocab.idx2sym)))
     va_iter = corpus.get_iterator('valid', 10, 64, device='cpu', ext_len=0)
     for idx, (data, target, seq_len) in enumerate(va_iter):
