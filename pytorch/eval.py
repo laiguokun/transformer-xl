@@ -6,7 +6,7 @@ import os, sys
 
 import torch
 
-from data_utils import get_lm_corpus
+from data_utils import get_lm_corpus, get_renormalize_vocab
 from mem_transformer import MemTransformerLM
 from utils.exp_utils import get_logger
 
@@ -49,7 +49,7 @@ logging = get_logger(os.path.join(args.work_dir, 'log.txt'),
                      log_=not args.no_log)
 
 # Load dataset
-corpus = get_lm_corpus(args.data, args.dataset, renormalize=args.renormalize, only_eval=True)
+corpus = get_lm_corpus(args.data, args.dataset, renormalize=False)
 ntokens = len(corpus.vocab)
 
 va_iter = corpus.get_iterator('valid', args.batch_size, args.tgt_len,
@@ -72,6 +72,10 @@ if args.clamp_len > 0:
 if args.same_length:
     model.same_length = True
 
+if args.renormalize:
+    renormalize_vocab = get_renormalize_vocab(args.data, args.dataset)
+    renormalize_vocab.set_cuda(args.cuda)
+
 ###############################################################################
 # Evaluation code
 ###############################################################################
@@ -81,20 +85,31 @@ def evaluate(eval_iter):
     total_len, total_loss = 0, 0.
     start_time = time.time()
     cnt = 0
+    last_status = renormalize_vocab.build_initial_status(args.batch_size)
     with torch.no_grad():
         mems = tuple()
         for idx, (data, target, seq_len) in enumerate(eval_iter):
-            if type(target)==list:
+            if args.renormalize:
                 ret = model.forward_renormalize(data, target, *mems)
             else:
                 ret = model(data, target, *mems)
-            loss, mems = ret[0], ret[1:]
-            loss = loss.mean()
-            total_loss += seq_len * loss.item()
+            if args.renormalize:
+                out_logit = ret[-1]
+            loss, mems = ret[0], ret[1:-1]
+            if args.renormalize:
+                loss, last_status = renormalize_vocab.get_eval_loss(
+                    data.cpu().numpy(), 
+                    target.cpu().numpy(), 
+                    out_logit.cpu().numpy(), 
+                    last_status)
+                loss = loss.mean()
+            else:
+                loss = loss.mean().item()
+            total_loss += seq_len * loss
             total_len += seq_len
             cnt += 1
-            #if cnt > 10:
-            #    break
+            if cnt > 10:
+                break
         total_time = time.time() - start_time
     logging('Time : {:.2f}s, {:.2f}ms/segment'.format(
             total_time, 1000 * total_time / (idx+1)))

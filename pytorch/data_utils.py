@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from utils.vocabulary import Vocab
-from utils.renormalize import RenormalizeVocab, LMOrderedRenomalizeIterator
+from utils.renormalize_calc import RenormalizeVocabPost
 
 class LMOrderedIterator(object):
     def __init__(self, data, bsz, bptt, device='cpu', ext_len=None):
@@ -176,67 +176,32 @@ class LMMultiFileIterator(LMShuffledIterator):
 
 
 class Corpus(object):
-    def __init__(self, path, dataset, renormalize=False, *args, **kwargs):
-        self.renormalize = renormalize
-        if self.renormalize:
-            self.get_renormalize_corpus(path, dataset, *args, **kwargs)
-        else:
-            self.get_corpus(path, dataset, *args, **kwargs)
-
-    def get_renormalize_corpus(self, path, dataset, *args, **kwargs):
-        self.dataset = dataset
-        add_eos = False
-        add_double_eos = False
-        if dataset in ['ptb', 'wt2', 'wt103']:
-            add_eos = True
-        elif dataset in ['lm1b']:
-            add_double_eos = True
-        kwargs['vocab_map_fn'] = os.path.join(path, 'vocab_map.txt')
-        kwargs['vocab_fn'] = os.path.join(path, 'vocab.txt')
-        kwargs['add_eos'] = add_eos
-        kwargs['add_double_eos'] = add_double_eos
-        self.vocab = RenormalizeVocab(**kwargs)
-        self.vocab.build_renormalize_vocab()
-        if dataset not in ['lm1b']:
-            self.valid = self.vocab.encode_file(os.path.join(path, 'valid.txt'), ordered=True)
-            self.test  = self.vocab.encode_file(os.path.join(path, 'test.txt'), ordered=True)
-        #torch.save(self.renormalize_vocab, renomalize_vocab_fn)
-
-
-    def get_train_corpus(self, path, dataset, *args, **kwargs):
+    def __init__(self, path, dataset, *args, **kwargs):
         self.dataset = dataset
         self.vocab = Vocab(*args, **kwargs)
+
         if self.dataset in ['ptb', 'wt2', 'enwik8', 'text8']:
             self.vocab.count_file(os.path.join(path, 'train.txt'))
             self.vocab.count_file(os.path.join(path, 'valid.txt'))
             self.vocab.count_file(os.path.join(path, 'test.txt'))
         elif self.dataset == 'wt103':
-            if self.only_eval ==False:
-                self.vocab.count_file(os.path.join(path, 'train.txt'))
+            self.vocab.count_file(os.path.join(path, 'train.txt'))
         elif self.dataset == 'lm1b':
             train_path_pattern = os.path.join(
                 path, '1-billion-word-language-modeling-benchmark-r13output',
                 'training-monolingual.tokenized.shuffled', 'news.en-*')
             train_paths = glob.glob(train_path_pattern)
             # the vocab will load from file when build_vocab() is called
+
         self.vocab.build_vocab()
 
         if self.dataset in ['ptb', 'wt2', 'wt103']:
-            if self.only_eval == False:
-                self.train = self.vocab.encode_file(
-                    os.path.join(path, 'train.txt'), ordered=True)
-            if self.renormalize:
-                self.valid = self.vocab.encode_file_renormalize(
-                    os.path.join(path, 'valid.txt'), os.path.join(path, 'valid_next_word.pt'),
-                    ordered=True)
-                self.test  = self.vocab.encode_file_renormalize(
-                    os.path.join(path, 'test.txt'), os.path.join(path, 'test_next_word.pt'),
-                    ordered=True)
-            else:
-                self.valid = self.vocab.encode_file(
-                    os.path.join(path, 'valid.txt'), ordered=True)
-                self.test  = self.vocab.encode_file(
-                    os.path.join(path, 'test.txt'), ordered=True)
+            self.train = self.vocab.encode_file(
+                os.path.join(path, 'train.txt'), ordered=True)
+            self.valid = self.vocab.encode_file(
+                os.path.join(path, 'valid.txt'), ordered=True)
+            self.test  = self.vocab.encode_file(
+                os.path.join(path, 'test.txt'), ordered=True)
         elif self.dataset in ['enwik8', 'text8']:
             self.train = self.vocab.encode_file(
                 os.path.join(path, 'train.txt'), ordered=True, add_eos=False)
@@ -261,11 +226,7 @@ class Corpus(object):
         elif split in ['valid', 'test']:
             data = self.valid if split == 'valid' else self.test
             if self.dataset in ['ptb', 'wt2', 'wt103', 'enwik8', 'text8']:
-                if self.renormalize:
-                    kwargs['vocab'] = self.vocab
-                    data_iter = LMOrderedRenomalizeIterator(data, *args, **kwargs)
-                else:
-                    data_iter = LMOrderedIterator(data, *args, **kwargs)
+                data_iter = LMOrderedIterator(data, *args, **kwargs)
             elif self.dataset == 'lm1b':
                 data_iter = LMShuffledIterator(data, *args, **kwargs)
 
@@ -301,6 +262,34 @@ def get_lm_corpus(datadir, dataset, renormalize=False):
 
 
     return corpus
+
+def get_renormalize_vocab(datadir, dataset):
+    kwargs = {}
+
+    if dataset in ['wt103', 'wt2']:
+        kwargs['special'] = ['<eos>']
+        kwargs['lower_case'] = False
+    elif dataset == 'ptb':
+        kwargs['special'] = ['<eos>']
+        kwargs['lower_case'] = True
+    elif dataset == 'lm1b':
+        kwargs['special'] = ['<S>']
+        kwargs['lower_case'] = False
+        kwargs['vocab_file'] = os.path.join(datadir, 'vocab_idx.txt')
+
+    add_eos = False
+    add_double_eos = False
+    if dataset in ['ptb', 'wt2', 'wt103']:
+        add_eos = True
+    elif dataset in ['lm1b']:
+        add_double_eos = True
+    kwargs['vocab_map_fn'] = os.path.join(datadir, 'vocab_map.txt')
+    kwargs['vocab_fn'] = os.path.join(datadir, 'vocab.txt')
+    kwargs['add_eos'] = add_eos
+    kwargs['add_double_eos'] = add_double_eos
+    vocab = RenormalizeVocabPost(**kwargs)
+    vocab.build_renormalize_vocab()
+    return vocab
 
 if __name__ == '__main__':
     import argparse

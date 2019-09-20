@@ -38,14 +38,12 @@ class PositionwiseFF(nn.Module):
         self.d_model = d_model
         self.d_inner = d_inner
         self.dropout = dropout
-
         self.CoreNet = nn.Sequential(
             nn.Linear(d_model, d_inner), nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(d_inner, d_model),
             nn.Dropout(dropout),
         )
-
         self.layer_norm = nn.LayerNorm(d_model)
 
         self.pre_lnorm = pre_lnorm
@@ -766,8 +764,6 @@ class MemTransformerLM(nn.Module):
         # them together.
         if not mems: mems = self.init_mems()
 
-        target, next_word_batch = target
-
         tgt_len = target.size(0)
         hidden, new_mems = self._forward(data, mems=mems)
 
@@ -778,16 +774,16 @@ class MemTransformerLM(nn.Module):
                 self.out_layer.bias, target, pred_hid, self.sampler)
             loss = -F.log_softmax(logit, -1)[:, :, 0]
         else:
-            loss = self.crit.forward_renormalize(
+            loss, out_logit = self.crit.forward_renormalize(
                 pred_hid.view(-1, pred_hid.size(-1)), 
-                target.view(-1), 
-                next_word_batch.view(-1, next_word_batch.size(-1)))
+                target.view(-1))
             loss = loss.view(tgt_len, -1)
-
+            out_logit = out_logit.view(tgt_len, target.size(1), -1)
+            
         if new_mems is None:
-            return [loss]
+            return [loss] + [out_logit]
         else:
-            return [loss] + new_mems
+            return [loss] + new_mems + [out_logit]
 
 if __name__ == '__main__':
     import argparse
