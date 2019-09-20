@@ -1,24 +1,21 @@
+import numpy as np
+
 from collections import Counter, OrderedDict
 
-import torch
-import torch.nn.functional as F
-
+def log_softmax(x, dim):
+    e_x = np.exp(x - np.max(x, axis=dim, keepdims=True))
+    return np.log(e_x / e_x.sum(axis=dim, keepdims=True))
 
 class RenormalizeVocabPost(object):
     def __init__(self, vocab_map_fn=None, vocab_fn=None, special=[]):
 
+        self.delimiter = delimiter
+        self.lower_case = lower_case
+        self.add_double_eos = add_double_eos
+        self.add_eos = add_eos
         self.special = special
         self.vocab_map_fn = vocab_map_fn
         self.load_vocab(vocab_fn)
-        self.device = torch.device("cpu")
-
-    def set_cuda(self, cuda):
-        if cuda:
-            self.device = torch.device("cuda")
-        else:
-            self.device = torch.device("cpu")
-        self.head_vocab = self.head_vocab.to(self.device)
-        self.end_vocab = self.end_vocab.to(self.device)
 
     def build_renormalize_vocab(self, ):
         self.load_vocab_mapping(self.vocab_map_fn)
@@ -45,8 +42,8 @@ class RenormalizeVocabPost(object):
             self.trie[token] = head_vocab_set
 
     def load_vocab_mapping(self, map_fn):
-        self.head_vocab = torch.zeros(len(self.idx2sym)).byte()
-        self.end_vocab = torch.zeros(len(self.idx2sym)).byte()
+        self.head_vocab = np.zeros(len(self.idx2sym), dtype=int)
+        self.end_vocab = np.zeros(len(self.idx2sym), dtype=int)
         self.vocab_map = {}
         with open(map_fn) as fin:
             for i, line in enumerate(fin):
@@ -98,40 +95,35 @@ class RenormalizeVocabPost(object):
             output prob: numpy array (T X bsz X V)
         '''
         T, bsz, V = out_logit.shape
-        data = torch.from_numpy(data).to(self.device)
-        target = torch.from_numpy(target).to(self.device)
-        out_logit = torch.from_numpy(out_logit).to(self.device)
-
         next_word, new_status = self.get_next_word_set(data, last_status)
         head_vocab = self.head_vocab.reshape((1,1,-1))
         end_marks = self.get_end_marks(data).reshape(T, bsz, 1)
         head_vocab = head_vocab * end_marks
         next_word = next_word | head_vocab
-        out_logit.masked_fill_(~next_word, -float('inf'))
-        logit = -F.log_softmax(out_logit, dim=2)
-        target = target.view(T, bsz, 1)
-        nll = torch.gather(logit, 2, target)
+        out_logit[next_word == 0] = -float('inf')
+        logit = log_softmax(out_logit, dim=2)
+        target = target.reshape(T, bsz, 1)
+        nll = -np.take_along_axis(logit, target, axis=2)
         return nll, new_status
 
     def get_end_marks(self, symbols):
-        symbols = symbols.view(-1,)
-        ret = torch.gather(self.end_vocab, 0, symbols)
+        ret = np.take(self.end_vocab, symbols)
         return ret
 
     def get_next_word_set(self, symbols, last_status):
-        next_word = torch.zeros(
-            (symbols.shape[0], symbols.shape[1], len(self.sym2idx))).byte().to(self.device)
+        next_word = np.zeros(
+            (symbols.shape[0], symbols.shape[1], len(self.sym2idx)), dtype=int)
         new_status = []
         for batch_idx in range(symbols.shape[1]):
             node = last_status[batch_idx]
             for i in range(symbols.shape[0]):
-                token = symbols[i][batch_idx].item()
+                token = symbols[i][batch_idx]
                 if self.head_vocab[token] == 1:
                     node = self.trie
                 if node == -1:
                     next_word[i][batch_idx][:] = 1
                 else:
-                    token_list = torch.LongTensor(list(node[token].keys()))
+                    token_list = list(node[token].keys())
                     next_word[i][batch_idx][token_list] = 1
                     node = node[token]
             new_status.append(node)

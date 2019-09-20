@@ -268,25 +268,13 @@ def get_renormalize_vocab(datadir, dataset):
 
     if dataset in ['wt103', 'wt2']:
         kwargs['special'] = ['<eos>']
-        kwargs['lower_case'] = False
     elif dataset == 'ptb':
         kwargs['special'] = ['<eos>']
-        kwargs['lower_case'] = True
     elif dataset == 'lm1b':
         kwargs['special'] = ['<S>']
-        kwargs['lower_case'] = False
-        kwargs['vocab_file'] = os.path.join(datadir, 'vocab_idx.txt')
 
-    add_eos = False
-    add_double_eos = False
-    if dataset in ['ptb', 'wt2', 'wt103']:
-        add_eos = True
-    elif dataset in ['lm1b']:
-        add_double_eos = True
     kwargs['vocab_map_fn'] = os.path.join(datadir, 'vocab_map.txt')
     kwargs['vocab_fn'] = os.path.join(datadir, 'vocab.txt')
-    kwargs['add_eos'] = add_eos
-    kwargs['add_double_eos'] = add_double_eos
     vocab = RenormalizeVocabPost(**kwargs)
     vocab.build_renormalize_vocab()
     return vocab
