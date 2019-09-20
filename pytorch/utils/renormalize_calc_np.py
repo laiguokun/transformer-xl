@@ -9,10 +9,6 @@ def log_softmax(x, dim):
 class RenormalizeVocabPost(object):
     def __init__(self, vocab_map_fn=None, vocab_fn=None, special=[]):
 
-        self.delimiter = delimiter
-        self.lower_case = lower_case
-        self.add_double_eos = add_double_eos
-        self.add_eos = add_eos
         self.special = special
         self.vocab_map_fn = vocab_map_fn
         self.load_vocab(vocab_fn)
@@ -21,6 +17,9 @@ class RenormalizeVocabPost(object):
         self.load_vocab_mapping(self.vocab_map_fn)
         self.build_trie_tree()
 
+    def set_cuda(self, cuda):
+        pass
+        
     def build_trie_tree(self,):
         self.trie = {}
         head_vocab_set = {}
