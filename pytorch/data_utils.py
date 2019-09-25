@@ -263,7 +263,7 @@ def get_lm_corpus(datadir, dataset, renormalize=False):
 
     return corpus
 
-def get_renormalize_vocab(datadir, dataset):
+def get_renormalize_vocab(datadir, dataset, unique_flag):
     kwargs = {}
 
     if dataset in ['wt103', 'wt2']:
@@ -275,6 +275,7 @@ def get_renormalize_vocab(datadir, dataset):
 
     kwargs['vocab_map_fn'] = os.path.join(datadir, 'vocab_map.txt')
     kwargs['vocab_fn'] = os.path.join(datadir, 'vocab.txt')
+    kwargs['unique_flag'] = unique_flag
     vocab = RenormalizeVocabPost(**kwargs)
     vocab.build_renormalize_vocab()
     return vocab

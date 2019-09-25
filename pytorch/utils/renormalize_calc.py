@@ -5,12 +5,14 @@ import torch.nn.functional as F
 
 
 class RenormalizeVocabPost(object):
-    def __init__(self, vocab_map_fn=None, vocab_fn=None, special=[]):
+    def __init__(self, vocab_map_fn=None, vocab_fn=None, special=[], unique_flag='head'):
 
         self.special = special
         self.vocab_map_fn = vocab_map_fn
         self.load_vocab(vocab_fn)
         self.device = torch.device("cpu")
+        # the sentence piece style is 'head' and the bpe style is 'end'
+        self.unique_flag = unique_flag 
 
     def set_cuda(self, cuda):
         if cuda:
@@ -36,8 +38,12 @@ class RenormalizeVocabPost(object):
                 token = self.vocab_map[word][i]
                 if token not in node:
                     node[token] = {}
-                assert not (i>0 and self.head_vocab[token]==1), \
+                assert not (self.unique_flag=='head' and i>0 \
+                    and self.head_vocab[token]==1), \
                     'middle token cannot be head token'
+                assert not (self.unique_flag=='end' and i<len(self.vocab_map[word])-1 \
+                    and self.end_vocab[token]==1), \
+                    'middel token cannot be end token'
                 node = node[token]
             for token in self.special_idx:
                 node[token] = {}
@@ -85,6 +91,8 @@ class RenormalizeVocabPost(object):
             for line in f:
                 symb = line.strip().split()[0]
                 self.add_symbol(symb)
+        for token in self.special:
+            self.add_symbol(token)
         self.special_idx = [self.sym2idx[token] for token in self.special]
 
     def build_initial_status(self, bsz):
@@ -126,14 +134,18 @@ class RenormalizeVocabPost(object):
             node = last_status[batch_idx]
             for i in range(symbols.shape[0]):
                 token = symbols[i][batch_idx].item()
-                if self.head_vocab[token] == 1:
-                    node = self.trie
+                if self.unique_flag == 'head':
+                    if self.head_vocab[token] == 1:
+                        node = self.trie
                 if node == -1:
                     next_word[i][batch_idx][:] = 1
                 else:
                     token_list = torch.LongTensor(list(node[token].keys()))
                     next_word[i][batch_idx][token_list] = 1
-                    node = node[token]
+                    if self.unique_flag == 'end' and self.end_vocab[token] == 1:
+                        node = self.trie
+                    else:
+                        node = node[token]
             new_status.append(node)
         return next_word, new_status
 
