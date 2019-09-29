@@ -5,9 +5,10 @@ import math
 import os, sys
 
 import torch
+import torch.nn as nn
 import numpy as np
 from data_utils import get_lm_corpus
-from mem_transformer import MemTransformerLM
+from mem_transformer import MemTransformerLM, EvalModel
 from utils.exp_utils import get_logger
 
 parser = argparse.ArgumentParser(description='PyTorch Transformer Language Model')
@@ -58,12 +59,13 @@ tr_iter = corpus.get_iterator('train', args.batch_size, args.tgt_len,
 with open(os.path.join(args.work_dir, 'model.pt'), 'rb') as f:
     model = torch.load(f)
 model.backward_compatible()
-model = model.to(device)
+model.reset_length(args.tgt_len, args.ext_len, args.mem_len)
+eval_model = EvalModel(model)
+
+eval_model = nn.DataParallel(eval_model, dim=1).to(device)
 
 logging('Evaluating with bsz {} tgt_len {} ext_len {} mem_len {} clamp_len {}'.format(
        args.batch_size, args.tgt_len, args.ext_len, args.mem_len, args.clamp_len))
-
-model.reset_length(args.tgt_len, args.ext_len, args.mem_len)
 if args.clamp_len > 0:
     model.clamp_len = args.clamp_len
 if args.same_length:
@@ -85,7 +87,7 @@ def evaluate(eval_iter):
     with torch.no_grad():
         mems = tuple()
         for idx, (data, target, seq_len) in enumerate(eval_iter):
-            ret = model.get_hidden_rep(data, target, *mems)
+            ret = eval_model(data, target, *mems)
             hidden, mems = ret[0], ret[1:]
             hidden = hidden.view(-1, hidden.size(-1))
             target = target.view(-1, target.size(-1))

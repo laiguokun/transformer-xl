@@ -773,6 +773,16 @@ class MemTransformerLM(nn.Module):
             return [pred_hid] + new_mems
 
 
+class EvalModel(nn.Module):
+    def __init__(self, model):
+        super(EvalModel, self).__init__()
+        self.model = model
+    
+    def forward(self, data, target, *mems):
+        ret = self.model.get_hidden_rep(data, target, *mems)
+        return ret
+
+
 if __name__ == '__main__':
     import argparse
 
