@@ -167,3 +167,12 @@ class ProjectedAdaptiveLogSoftmax(nn.Module):
         else:
             assert False
         return [nll, logit]
+
+
+    def forward_with_knn(self, hidden, target, knn_p, lamb, keep_order=False):
+        logit = self._compute_logit(hidden, self.out_layers[0].weight,
+                                    self.out_layers[0].bias, self.out_projs[0])
+        logit = torch.softmax(logit, -1)
+        logit = lamb * knn_p + (1-lamb) * logit
+        nll = -torch.log(logit).gather(1, target.unsqueeze(1)).squeeze(1)
+        return nll

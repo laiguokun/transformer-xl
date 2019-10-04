@@ -773,6 +773,12 @@ class MemTransformerLM(nn.Module):
             return [pred_hid] + new_mems
 
 
+    def crit_with_knn(self, hidden, target, knnp, lamb):
+        hidden = hidden.view(-1, hidden.size(-1))
+        knnp = knnp.view(-1, knnp.size(-1))
+        loss = self.crit.forward_with_knn(hidden, target.view(-1), knnp, lamb)
+        return loss
+
 class EvalModel(nn.Module):
     def __init__(self, model):
         super(EvalModel, self).__init__()
