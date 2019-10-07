@@ -58,7 +58,7 @@ flags.DEFINE_integer("num_core_per_host", default=8,
                      help="number of cores per host")
 
 # Experiment (data/checkpoint/directory) config
-flags.DEFINE_integer("num_passes", default=20,
+flags.DEFINE_integer("num_passes", default=10,
                      help="Number of passed used for training.")
 flags.DEFINE_string("record_dir", default=None,
                     help="Path to directory containing tfrecords.")
@@ -68,6 +68,8 @@ flags.DEFINE_string("init_checkpoint", default=None,
                     help="Checkpoint path for initializing the model.")
 
 # Training config
+flags.DEFINE_bool("do_train", True,
+                  help="Whether to perform training.")
 flags.DEFINE_integer("train_batch_size", default=16,
                      help="Size of the train batch across all hosts.")
 flags.DEFINE_integer("train_steps", default=100000,
@@ -82,7 +84,19 @@ flags.DEFINE_integer("max_save", default=100000,
 flags.DEFINE_bool("use_bfloat16", False,
                   help="Whether to use bfloat16.")
 flags.DEFINE_bool("float32_softmax", True,
-                  help="Whether to use float32 softmax.")
+                  help="Whether to use float32 for softmax.")
+
+# Evaluation config
+flags.DEFINE_bool("do_eval", False,
+                  help="Whether to perform evaluation.")
+flags.DEFINE_enum("eval_split", "valid", ["valid", "test"],
+                  help="Which split to eval.")
+flags.DEFINE_integer("eval_batch_size", default=16,
+                     help="Size of the eval batch across all hosts.")
+flags.DEFINE_string("eval_ckpt_path", default=None,
+                    help="Path to the specific ckpt to evaluate.")
+flags.DEFINE_integer("eval_steps", default=None,
+                     help="Number of evaluation steps to run.")
 
 # Data config
 flags.DEFINE_string("tokenizer_type", "sent_piece",
@@ -147,25 +161,42 @@ def get_model_fn():
 
     #### Training or Evaluation
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
-    assert is_training
 
     #### Retrieve `mems` from `params["cache"]`
-    mems = {}
+    mems = None
     if FLAGS.mem_len > 0:
-      mems["mems"] = params["cache"]
+      mems = params["cache"]
 
     #### Get loss from inputs
     total_loss, new_mems, monitor_dict = model_function.get_lm_loss(
         features, mems, is_training)
 
-    #### Turn `new_mems` into `new_cache`
+    #### Put `new_mems` into `new_cache`
     new_cache = []
     if FLAGS.mem_len > 0:
-      new_cache += new_mems["mems"]
+      new_cache += new_mems
 
     #### Check model parameters
     num_params = sum([np.prod(v.shape) for v in tf.trainable_variables()])
     tf.logging.info("#params: %d", num_params)
+
+    if mode == tf.estimator.ModeKeys.EVAL:
+      def metric_fn(loss):
+        """Evaluation metric Fn which runs on CPU."""
+        perplexity = tf.exp(tf.reduce_mean(loss) * 1.2)
+        return {
+            "perplexity": tf.metrics.mean(perplexity),
+        }
+
+      metric_loss = tf.reshape(total_loss, [1, 1])
+      eval_spec = tf.contrib.tpu.TPUEstimatorSpec(
+          mode=mode,
+          loss=total_loss,
+          eval_metrics=(metric_fn, [metric_loss]))
+
+      eval_spec.cache = new_cache
+
+      return eval_spec
 
     #### Configuring the optimizer
     train_op, optim_dict = optimization.get_train_op(total_loss)
@@ -200,9 +231,14 @@ def get_cache_fn(mem_len):
     mems = []
     if FLAGS.mem_len > 0:
       for _ in range(FLAGS.n_layer):
-        zeros = tf.zeros(
-            [batch_size, mem_len, FLAGS.d_model],
-            dtype=tf_float)
+        if FLAGS.chunk_len is not None:
+          zeros = tf.zeros(
+              [batch_size, mem_len, FLAGS.chunk_len, FLAGS.d_model],
+              dtype=tf_float)
+        else:
+          zeros = tf.zeros(
+              [batch_size, mem_len, FLAGS.d_model],
+              dtype=tf_float)
         mems.append(zeros)
 
     return mems
@@ -215,7 +251,10 @@ def get_cache_fn(mem_len):
 
 def get_input_fn(split):
   """doc."""
-  batch_size = FLAGS.train_batch_size
+  if split == "train":
+    batch_size = FLAGS.train_batch_size
+  else:
+    batch_size = FLAGS.eval_batch_size
 
   input_fn, record_info_dict = input_function.get_input_fn(
       tfrecord_dir=FLAGS.record_dir,
@@ -242,12 +281,9 @@ def main(unused_argv):
       do_lower_case=FLAGS.lower_case)
   data_utils.setup_special_ids(tokenizer)
 
-  # Get train input function
-  train_input_fn, train_record_info_dict = get_input_fn("train")
-  tf.logging.info("num of batches %d", train_record_info_dict["num_batch"])
-
-  # Get train cache function
+  ##### Get train cache function
   train_cache_fn = get_cache_fn(FLAGS.mem_len)
+  eval_cache_fn = get_cache_fn(FLAGS.mem_len)
 
   ##### Get model function
   model_fn = get_model_fn()
@@ -260,13 +296,36 @@ def main(unused_argv):
   estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
       train_cache_fn=train_cache_fn,
+      eval_cache_fn=eval_cache_fn,
       use_tpu=FLAGS.use_tpu,
       config=run_config,
       train_batch_size=FLAGS.train_batch_size,
+      eval_batch_size=FLAGS.eval_batch_size,
       eval_on_tpu=FLAGS.use_tpu)
 
-  #### Training
-  estimator.train(input_fn=train_input_fn, max_steps=FLAGS.train_steps)
+  ##### Training
+  if FLAGS.do_train:
+    # Get train input function
+    train_input_fn, train_record_info_dict = get_input_fn("train")
+    tf.logging.info("num of train batches %d",
+                    train_record_info_dict["num_batch"])
+
+    estimator.train(input_fn=train_input_fn, max_steps=FLAGS.train_steps)
+
+  #### Evaluation
+  if FLAGS.do_eval:
+    # Get eval input function
+    eval_input_fn, eval_record_info_dict = get_input_fn(FLAGS.eval_split)
+    num_eval_batch = eval_record_info_dict["num_batch"]
+    tf.logging.info("num of eval batches %d", num_eval_batch)
+
+    if FLAGS.eval_steps is not None:
+      eval_steps = min(num_eval_batch, FLAGS.eval_steps)
+    else:
+      eval_steps = num_eval_batch
+
+    estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps,
+                       checkpoint_path=FLAGS.eval_ckpt_path)
 
 
 if __name__ == "__main__":

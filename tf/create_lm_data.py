@@ -52,7 +52,7 @@ flags.DEFINE_string("input_glob", "data/example/*.txt",
                     help="Input file glob.")
 flags.DEFINE_string("save_dir", "proc_data/example",
                     help="Directory for saving the processed data.")
-flags.DEFINE_enum("split", "train", ["train", "dev", "test"],
+flags.DEFINE_enum("split", "train", ["train", "valid", "test"],
                   help="Save the data as which split.")
 flags.DEFINE_integer("pass_id", 0, help="ID of the current pass."
                      "Different passes sample different concat orders.")
@@ -123,8 +123,8 @@ def _create_data(input_paths, tokenizer):
   np.random.seed(100 * FLAGS.task + FLAGS.pass_id)
 
   perm_indices = np.random.permutation(len(input_shards))
-  tf.logging.info("Using perm indices %s for pass %d",
-                  perm_indices.tolist(), FLAGS.pass_id)
+  tf.logging.debug("Using perm indices %s for pass %d",
+                   perm_indices.tolist(), FLAGS.pass_id)
 
   input_data_list = [input_shards[idx] for idx in perm_indices]
   input_data = np.concatenate(input_data_list)
@@ -206,9 +206,15 @@ def batchify(data, bsz_per_host):
   remove_len = len(data) - remain_len
 
   if remove_len > 0:
-    # Randomly select begin step
-    np.random.seed(100 * FLAGS.task + FLAGS.pass_id)
-    beg_step = np.random.choice(remove_len, 1).item()
+    tf.logging.info("Discard %d tokens.", remove_len)
+    if FLAGS.pass_id == 0:
+      beg_step = 0
+    elif FLAGS.pass_id == 1:
+      beg_step = remove_len - 1
+    else:
+      # Randomly select begin step
+      np.random.seed(100 * FLAGS.task + FLAGS.pass_id)
+      beg_step = np.random.choice(remove_len, 1).item()
   else:
     beg_step = 0
 

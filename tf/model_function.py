@@ -78,7 +78,7 @@ def bf16_decorator(func):
 
 
 def _get_initializer():
-  """Get variable intializer."""
+  """Get variable initializer."""
   tf.logging.info("Using %s initializer", FLAGS.init)
   if FLAGS.init == "uniform":
     initializer = tf.initializers.random_uniform(
@@ -142,12 +142,8 @@ def _get_tfm_func(n_token, initializer, is_training, **kwargs):
   return tfm_func
 
 
-@bf16_decorator
-def get_lm_loss(features, mems, is_training):
-  """Get LM loss."""
-
+def get_lm_pred(features, mems, is_training):
   #### Unpack inputs
-  mems = mems.get("mems", None)
   inputs = features["inputs"]
   target = features["target"]
 
@@ -159,14 +155,51 @@ def get_lm_loss(features, mems, is_training):
                            is_training=is_training)
 
   # new memory
-  new_mems = {}
+  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
+    # Transformer
+    output, new_mems, lookup_table, _ = tfm_func(
+        inputs=inputs,
+        mems=mems,
+        input_mask=None)
+
+    # LM loss
+    lm_loss, logits = model.lm_loss(
+        hidden=output,
+        target=target,
+        n_token=n_token,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        lookup_table=lookup_table,
+        tie_weight=getattr(FLAGS, "tie_weight", True),
+        target_mapping=None,
+        hidden_mapping=None,
+        return_logits=True,
+        use_tpu=FLAGS.use_tpu)
+
+  return lm_loss, logits, new_mems
+
+
+@bf16_decorator
+def get_lm_loss(features, mems, is_training):
+  """Get LM loss."""
+
+  #### Unpack inputs
+  inputs = features["inputs"]
+  target = features["target"]
+
+  #### Get transformer function
+  n_token = FLAGS.vocab_size
+  initializer = _get_initializer()
+  tfm_func = _get_tfm_func(n_token=n_token,
+                           initializer=initializer,
+                           is_training=is_training)
 
   # tensor to monitor
   monitor_dict = {}
 
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
     # Transformer
-    output, new_mems["mems"], lookup_table, _ = tfm_func(
+    output, new_mems, lookup_table, _ = tfm_func(
         inputs=inputs,
         mems=mems,
         input_mask=None)
