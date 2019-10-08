@@ -61,8 +61,14 @@ class RenormalizeVocabPost(object):
         with open(map_fn) as fin:
             for i, line in enumerate(fin):
                 tokens = line.strip().split('\t')
-                sub_tokens_idx = [self.sym2idx[token]
-                    for token in tokens[1].split()]
+                sub_tokens_idx = []
+                for token in tokens[1].split():
+                    if (token not in self.sym2idx):
+                        print('warning: cannot find {} in the vocab which belongs to mapping: {}' \
+                            .format(token, line.strip()))
+                        sub_tokens_idx.append(self.sym2idx['<unk>'])
+                    else:
+                        sub_tokens_idx.append(self.sym2idx[token])
                 self.vocab_map[tokens[0]] = sub_tokens_idx
                 self.head_vocab[sub_tokens_idx[0]] = 1
                 self.end_vocab[sub_tokens_idx[-1]] = 1
@@ -70,7 +76,6 @@ class RenormalizeVocabPost(object):
         for token in self.special_idx:
             self.head_vocab[token] = 1
             self.end_vocab[token] = 1
-
         assert self.check_reconstructable(map_fn)
 
     def check_reconstructable(self, map_fn):
@@ -103,12 +108,16 @@ class RenormalizeVocabPost(object):
         status = [-1] * bsz
         return status
 
-    def get_eval_loss(self, data, target, out_logit, last_status):
+    def get_eval_loss(self, data, target, out_logit, last_status, batch_first=True):
         '''
             input tensor: numpy array (T X bsz)
             target tensor: numpy array (T X bsz)
             output prob: numpy array (T X bsz X V)
         '''
+        if batch_first:
+            data = np.transpose(data, (1, 0))
+            target = np.transpose(target, (1, 0))
+            out_logit = np.transpose(out_logit, (1, 0, 2))
         T, bsz, V = out_logit.shape
         next_word, new_status = self.get_next_word_set(data, last_status)
         head_vocab = self.head_vocab.reshape((1,1,-1))
@@ -131,6 +140,7 @@ class RenormalizeVocabPost(object):
         new_status = []
         for batch_idx in range(symbols.shape[1]):
             node = last_status[batch_idx]
+            #print(symbols[:, batch_idx])
             for i in range(symbols.shape[0]):
                 token = symbols[i][batch_idx]
                 if self.unique_flag == 'head':
