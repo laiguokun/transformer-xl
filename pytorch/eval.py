@@ -39,6 +39,8 @@ parser.add_argument('--same_length', action='store_true',
                     help='set same length attention with masking')
 parser.add_argument('--renormalize', action='store_true',
                     help='renormlize for the sub-word model')
+parser.add_argument('--unique_flag', type=str,
+                    help='sentence piece is head and bpe is end')
 args = parser.parse_args()
 assert args.ext_len >= 0, 'extended context length must be non-negative'
 
@@ -73,7 +75,7 @@ if args.same_length:
     model.same_length = True
 
 if args.renormalize:
-    renormalize_vocab = get_renormalize_vocab(args.data, args.dataset)
+    renormalize_vocab = get_renormalize_vocab(args.data, args.dataset, args.unique_flag)
     renormalize_vocab.set_cuda(args.cuda)
 
 ###############################################################################
