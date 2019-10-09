@@ -29,7 +29,7 @@ flags.DEFINE_string("optimizer", default="adam",
 # learning rate schedule
 flags.DEFINE_float("learning_rate", default=1e-5, help="initial learning rate")
 flags.DEFINE_integer("warmup_steps", default=0, help="number of warmup steps")
-flags.DEFINE_string("decay_method", default="poly", help="poly or cos")
+flags.DEFINE_string("decay_method", default="cos", help="poly or cos")
 flags.DEFINE_float("min_lr_ratio", default=0.0,
                    help="min lr ratio for cos decay.")
 
@@ -42,7 +42,7 @@ flags.DEFINE_bool("bert_grad", False,
 flags.DEFINE_bool("clip_each_core", default=True,
                   help="Clip gradient on each core.")
 flags.DEFINE_float("clip", default=1.0, help="Gradient clipping")
-flags.DEFINE_bool("per_core_clip", True,
+flags.DEFINE_bool("per_core_clip", False,
                   help="Perform gradient clip on each TPU core.")
 flags.DEFINE_bool("dynamic_clip", False,
                   help="Whether to use dynamic clip.")
@@ -60,11 +60,12 @@ flags.DEFINE_float("adam_beta1", default=0.9,
                    help="The exponential decay rate for the 1st moment.")
 flags.DEFINE_float("adam_beta2", default=0.999,
                    help="The exponential decay rate for the 2nd moment.")
+flags.DEFINE_float("adam_epsilon", default=1e-6, help="adam epsilon")
+# adam weight decay
 flags.DEFINE_bool("adam_correction", default=True,
                   help="Use the adam bias correction.")
 flags.DEFINE_bool("use_wd_exclusion", default=False,
-                  help="Exclude certain params from weight decay as in BERT.")
-flags.DEFINE_float("adam_epsilon", default=1e-6, help="adam epsilon")
+                  help="Exclude certain params from weight decay.")
 
 # optimizer with momentum
 flags.DEFINE_float("momentum", default=0.99,

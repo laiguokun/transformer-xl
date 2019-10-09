@@ -293,9 +293,6 @@ def tfm_xl(inputs, mems, n_token, n_layer, d_model, n_head, d_head, d_inner,
       mems = [None] * n_layer
 
     for i in range(n_layer):
-      # cache new mems
-      new_mems.append(cache_memory(output_h, mems[i], mem_len))
-
       # local attention
       if FLAGS.chunk_len is not None and i in chunk_mapping:
         chunk_len_i = chunk_mapping[i]
@@ -316,6 +313,9 @@ def tfm_xl(inputs, mems, n_token, n_layer, d_model, n_head, d_head, d_inner,
         tf.logging.info("  - rel_pos_emb: %s", rel_pos_emb.shape)
         if attn_mask is not None:
           tf.logging.info("  - attn_mask: %s", attn_mask.shape)
+
+      # cache new mems
+      new_mems.append(cache_memory(output_h, mems[i], mem_len))
 
       with tf.variable_scope("layer_{}".format(i)):
         local_attn = (FLAGS.chunk_len is not None and
@@ -367,7 +367,7 @@ def tfm_xl(inputs, mems, n_token, n_layer, d_model, n_head, d_head, d_inner,
 
 def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
             tie_weight=False, hidden_mapping=None, target_mapping=None,
-            use_tpu=False):
+            return_logits=False, use_tpu=False):
   """Compute language modeling cross entropy loss."""
 
   tf.logging.info("===== Language model loss =====")
@@ -417,5 +417,8 @@ def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
       loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target,
                                                             logits=logits)
 
-    return loss
+    if return_logits:
+      return loss, logits
+    else:
+      return loss
 

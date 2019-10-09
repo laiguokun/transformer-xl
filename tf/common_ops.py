@@ -17,7 +17,7 @@ flags.DEFINE_bool("use_head_bias", default=False,
                   help="Whether to use bias in head projection.")
 flags.DEFINE_bool("share_w", default=False,
                   help="Whether to share W_k and W_r.")
-flags.DEFINE_bool("use_act_dropout", default=True,
+flags.DEFINE_float("dropact", default=0.1,
                   help="Apply dropout to nonlinear activation in FF.")
 flags.DEFINE_float("ln_eps", default=1e-12, help="")
 FLAGS = flags.FLAGS
@@ -231,9 +231,8 @@ def positionwise_ffn(inp, d_model, d_inner, dropout, kernel_initializer,
     output = tf.layers.dense(output, d_inner, activation=activation,
                             kernel_initializer=kernel_initializer,
                             name="layer_1")
-    if FLAGS.use_act_dropout:
-      output = tf.layers.dropout(output, dropout, training=is_training,
-                                 name="drop_1")
+    output = tf.layers.dropout(output, FLAGS.dropact, training=is_training,
+                               name="drop_1")
 
     output = tf.layers.dense(output, d_model,
                             kernel_initializer=kernel_initializer,
@@ -723,18 +722,27 @@ def local_abs_attn_core(q_head, k_head, v_head, attn_mask, dropatt, is_training,
 
 
 def local_rel_attn_core(q_head, k_head_h, v_head_h, k_head_r, r_w_bias,
-                        r_r_bias, attn_mask, dropatt, is_training, scale):
+                        r_r_bias, attn_mask, dropatt, is_training, scale,
+                        with_mem=False):
   """Core local relative positional attention operations."""
+  tf.logging.info("Local rel attn with mem: %s", with_mem)
   monitor_dict = {}
 
   # content based attention
-  attn_c = tf.einsum("bcxnh,bcynh->bncxy", q_head + r_w_bias, k_head_h) * scale
-  attn_l = tf.einsum("bcxnh,bcynh->bncxy",
-                     q_head[:, 1:], k_head_h[:, :-1]) * scale
-  attn_l = tf.pad(
-      attn_l,
-      tf.constant([[0, 0], [0, 0], [1, 0], [0, 0], [0, 0]]),
-      constant_values=-INF)
+  if with_mem:
+    attn_c = tf.einsum("bcxnh,bcynh->bncxy",
+                       q_head + r_w_bias, k_head_h[:, 1:]) * scale
+    attn_l = tf.einsum("bcxnh,bcynh->bncxy",
+                       q_head, k_head_h[:, :-1]) * scale
+  else:
+    attn_c = tf.einsum("bcxnh,bcynh->bncxy",
+                       q_head + r_w_bias, k_head_h) * scale
+    attn_l = tf.einsum("bcxnh,bcynh->bncxy",
+                       q_head[:, 1:], k_head_h[:, :-1]) * scale
+    attn_l = tf.pad(
+        attn_l,
+        tf.constant([[0, 0], [0, 0], [1, 0], [0, 0], [0, 0]]),
+        constant_values=-INF)
   ac = tf.concat([attn_l, attn_c], axis=-1)
 
   # location based attention
@@ -754,14 +762,20 @@ def local_rel_attn_core(q_head, k_head_h, v_head_h, k_head_r, r_w_bias,
       attn_prob,
       num_or_size_splits=2,
       axis=-1)
-  pad_v_head_h = tf.pad(
-      v_head_h,
-      tf.constant([[0, 0], [1, 0], [0, 0], [0, 0], [0, 0]])
-  )
-  attn_vec = (tf.einsum("bncxy,bcynh->bcxnh",
-                        attn_prob_l, pad_v_head_h[:, :-1]) +
-              tf.einsum("bncxy,bcynh->bcxnh",
-                        attn_prob_c, v_head_h))
+  if with_mem:
+    attn_vec = (tf.einsum("bncxy,bcynh->bcxnh",
+                          attn_prob_l, v_head_h[:, :-1]) +
+                tf.einsum("bncxy,bcynh->bcxnh",
+                          attn_prob_c, v_head_h[:, 1:]))
+  else:
+    pad_v_head_h = tf.pad(
+        v_head_h,
+        tf.constant([[0, 0], [1, 0], [0, 0], [0, 0], [0, 0]])
+    )
+    attn_vec = (tf.einsum("bncxy,bcynh->bcxnh",
+                          attn_prob_l, pad_v_head_h[:, :-1]) +
+                tf.einsum("bncxy,bcynh->bcxnh",
+                          attn_prob_c, v_head_h))
 
   return attn_vec, monitor_dict
 
@@ -838,9 +852,10 @@ def rel_multihead_attn(h, r, r_w_bias, r_r_bias, seg_mat, r_s_bias, seg_embed,
   with tf.variable_scope(scope, reuse=reuse):
     # core attention ops
     if local_attn:
+      with_mem = mems is not None and mems.shape.ndims > 1
       attn_vec, attn_core_dict = local_rel_attn_core(
           q_head_h, k_head_h, v_head_h, k_head_r, r_w_bias, r_r_bias,
-          attn_mask, dropatt, is_training, scale)
+          attn_mask, dropatt, is_training, scale, with_mem)
     else:
       attn_vec, attn_core_dict = rel_attn_core(
           q_head_h, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,

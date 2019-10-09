@@ -5,10 +5,12 @@ import math
 import os, sys
 
 import torch
+import faiss
 
 from data_utils import get_lm_corpus, get_renormalize_vocab
-from mem_transformer import MemTransformerLM
+from mem_transformer import MemTransformerLM, EvalModel
 from utils.exp_utils import get_logger
+from utils.knnp import get_knnp, read_target_table, read_hidden_table
 
 parser = argparse.ArgumentParser(description='PyTorch Transformer Language Model')
 parser.add_argument('--data', type=str, default='../data/wikitext-103',
@@ -37,10 +39,10 @@ parser.add_argument('--no_log', action='store_true',
                     help='do not log the eval result')
 parser.add_argument('--same_length', action='store_true',
                     help='set same length attention with masking')
-parser.add_argument('--renormalize', action='store_true',
-                    help='renormlize for the sub-word model')
-parser.add_argument('--unique_flag', type=str,
-                    help='sentence piece is head and bpe is end')
+parser.add_argument('--lamb', type=float, default=0.1,
+                    help='lambda of the evaluation function')
+parser.add_argument('--topk', type=int, default=256,
+                    help='lambda of the evaluation function')
 args = parser.parse_args()
 assert args.ext_len >= 0, 'extended context length must be non-negative'
 
@@ -60,13 +62,14 @@ te_iter = corpus.get_iterator('test', args.batch_size, args.tgt_len,
     device=device, ext_len=args.ext_len)
 
 # Load the best saved model.
+
 with open(os.path.join(args.work_dir, 'model.pt'), 'rb') as f:
     model = torch.load(f)
 model.backward_compatible()
 model = model.to(device)
 
-logging('Evaluating with bsz {} tgt_len {} ext_len {} mem_len {} clamp_len {}'.format(
-       args.batch_size, args.tgt_len, args.ext_len, args.mem_len, args.clamp_len))
+logging('Evaluating with bsz {} tgt_len {} ext_len {} mem_len {} clamp_len {} topk {} lamb {}'.format(
+       args.batch_size, args.tgt_len, args.ext_len, args.mem_len, args.clamp_len, args.topk, args.lamb))
 
 model.reset_length(args.tgt_len, args.ext_len, args.mem_len)
 if args.clamp_len > 0:
@@ -74,10 +77,16 @@ if args.clamp_len > 0:
 if args.same_length:
     model.same_length = True
 
-if args.renormalize:
-    renormalize_vocab = get_renormalize_vocab(args.data, args.dataset, args.unique_flag)
-    renormalize_vocab.set_cuda(args.cuda)
-
+print('loading index')
+index = faiss.read_index('/home/laiguokun/ssd/tmp/wt103.index')
+#index = faiss.read_index('/home/laiguokun/ssd/tmp/wt103_dot.index')
+#index = faiss.read_index('./faiss/test.index')
+index.nprobe = 32
+target_table = read_target_table(args.dataset)
+hidden_table = read_hidden_table(args.dataset)
+#hidden_table = None
+vocab_size = len(corpus.vocab)
+print('vocab size: {}'.format(vocab_size))
 ###############################################################################
 # Evaluation code
 ###############################################################################
@@ -87,33 +96,23 @@ def evaluate(eval_iter):
     total_len, total_loss = 0, 0.
     start_time = time.time()
     cnt = 0
-    last_status = renormalize_vocab.build_initial_status(args.batch_size)
+    #last_status = renormalize_vocab.build_initial_status(args.batch_size)
     with torch.no_grad():
         mems = tuple()
         for idx, (data, target, seq_len) in enumerate(eval_iter):
-            if args.renormalize:
-                ret = model.forward_renormalize(data, target, *mems)
+            ret = model.get_hidden_rep(data, target, *mems)
+            hidden, mems = ret[0], ret[1:]
+            if args.lamb > 0:
+                knnp = get_knnp(index, hidden, args.topk, 
+                    target_table, vocab_size, hidden_table)
+                loss = model.crit_with_knn(hidden, target, knnp, args.lamb).mean()
             else:
-                ret = model(data, target, *mems)
-            if args.renormalize:
-                out_logit = ret[-1]
-                loss, mems = ret[0], ret[1:-1]
-            else:
-                loss, mems = ret[0], ret[1:]
-            if args.renormalize:
-                loss, last_status = renormalize_vocab.get_eval_loss(
-                    data.cpu().numpy(), 
-                    target.cpu().numpy(), 
-                    out_logit.cpu().numpy(), 
-                    last_status)
-                loss = loss.mean()
-            else:
-                loss = loss.mean().item()
+                loss = model.crit(hidden.view(-1, hidden.size(-1)), target.view(-1)).mean()
             total_loss += seq_len * loss
             total_len += seq_len
             cnt += 1
-            if cnt > 10:
-                break
+            #if cnt > 10:
+            #    break
         total_time = time.time() - start_time
     logging('Time : {:.2f}s, {:.2f}ms/segment'.format(
             total_time, 1000 * total_time / (idx+1)))

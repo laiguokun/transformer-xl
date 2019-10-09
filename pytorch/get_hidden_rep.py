@@ -5,9 +5,10 @@ import math
 import os, sys
 
 import torch
-
-from data_utils import get_lm_corpus, get_renormalize_vocab
-from mem_transformer import MemTransformerLM
+import torch.nn as nn
+import numpy as np
+from data_utils import get_lm_corpus
+from mem_transformer import MemTransformerLM, EvalModel
 from utils.exp_utils import get_logger
 
 parser = argparse.ArgumentParser(description='PyTorch Transformer Language Model')
@@ -16,10 +17,10 @@ parser.add_argument('--data', type=str, default='../data/wikitext-103',
 parser.add_argument('--dataset', type=str, default='wt103',
                     choices=['wt103', 'lm1b', 'enwik8', 'text8'],
                     help='dataset name')
-parser.add_argument('--split', type=str, default='all',
-                    choices=['all', 'valid', 'test'],
+parser.add_argument('--split', type=str, default='train',
+                    choices=['train'],
                     help='which split to evaluate')
-parser.add_argument('--batch_size', type=int, default=10,
+parser.add_argument('--batch_size', type=int, default=128,
                     help='batch size')
 parser.add_argument('--tgt_len', type=int, default=5,
                     help='number of tokens to predict')
@@ -37,10 +38,7 @@ parser.add_argument('--no_log', action='store_true',
                     help='do not log the eval result')
 parser.add_argument('--same_length', action='store_true',
                     help='set same length attention with masking')
-parser.add_argument('--renormalize', action='store_true',
-                    help='renormlize for the sub-word model')
-parser.add_argument('--unique_flag', type=str,
-                    help='sentence piece is head and bpe is end')
+parser.add_argument('--save_dir', type=str, default='./tmp/')
 args = parser.parse_args()
 assert args.ext_len >= 0, 'extended context length must be non-negative'
 
@@ -51,32 +49,27 @@ logging = get_logger(os.path.join(args.work_dir, 'log.txt'),
                      log_=not args.no_log)
 
 # Load dataset
-corpus = get_lm_corpus(args.data, args.dataset, renormalize=False)
+corpus = get_lm_corpus(args.data, args.dataset)
 ntokens = len(corpus.vocab)
 
-va_iter = corpus.get_iterator('valid', args.batch_size, args.tgt_len,
-    device=device, ext_len=args.ext_len)
-te_iter = corpus.get_iterator('test', args.batch_size, args.tgt_len,
+tr_iter = corpus.get_iterator('train', args.batch_size, args.tgt_len,
     device=device, ext_len=args.ext_len)
 
 # Load the best saved model.
 with open(os.path.join(args.work_dir, 'model.pt'), 'rb') as f:
     model = torch.load(f)
 model.backward_compatible()
-model = model.to(device)
+model.reset_length(args.tgt_len, args.ext_len, args.mem_len)
+eval_model = EvalModel(model)
+
+eval_model = nn.DataParallel(eval_model, dim=1).to(device)
 
 logging('Evaluating with bsz {} tgt_len {} ext_len {} mem_len {} clamp_len {}'.format(
        args.batch_size, args.tgt_len, args.ext_len, args.mem_len, args.clamp_len))
-
-model.reset_length(args.tgt_len, args.ext_len, args.mem_len)
 if args.clamp_len > 0:
     model.clamp_len = args.clamp_len
 if args.same_length:
     model.same_length = True
-
-if args.renormalize:
-    renormalize_vocab = get_renormalize_vocab(args.data, args.dataset, args.unique_flag)
-    renormalize_vocab.set_cuda(args.cuda)
 
 ###############################################################################
 # Evaluation code
@@ -87,64 +80,42 @@ def evaluate(eval_iter):
     total_len, total_loss = 0, 0.
     start_time = time.time()
     cnt = 0
-    last_status = renormalize_vocab.build_initial_status(args.batch_size)
+    hidden_list = []
+    target_list = []
+    segment = eval_iter.n_batch // 10
+    print("total batch number {}, save per batch {}".format(eval_iter.n_batch, segment))
     with torch.no_grad():
         mems = tuple()
         for idx, (data, target, seq_len) in enumerate(eval_iter):
-            if args.renormalize:
-                ret = model.forward_renormalize(data, target, *mems)
-            else:
-                ret = model(data, target, *mems)
-            if args.renormalize:
-                out_logit = ret[-1]
-                loss, mems = ret[0], ret[1:-1]
-            else:
-                loss, mems = ret[0], ret[1:]
-            if args.renormalize:
-                loss, last_status = renormalize_vocab.get_eval_loss(
-                    data.cpu().numpy(), 
-                    target.cpu().numpy(), 
-                    out_logit.cpu().numpy(), 
-                    last_status)
-                loss = loss.mean()
-            else:
-                loss = loss.mean().item()
-            total_loss += seq_len * loss
-            total_len += seq_len
+            ret = eval_model(data, target, *mems)
+            hidden, mems = ret[0], ret[1:]
+            hidden = hidden.view(-1, hidden.size(-1))
+            target = target.view(-1, target.size(-1))
+            hidden_list.append(hidden.cpu().numpy().astype('float16'))
+            target_list.append(target.cpu().numpy())
             cnt += 1
-            if cnt > 10:
-                break
+            if cnt % segment == 0:
+                hidden_list = np.concatenate(hidden_list, axis=0)
+                target_list = np.concatenate(target_list, axis=0)
+                hidden_f = os.path.join(args.save_dir, 'hidden_{}.npy'.format(cnt//segment))
+                target_f = os.path.join(args.save_dir, 'target_{}.npy'.format(cnt//segment))
+                np.save(hidden_f, hidden_list)
+                np.save(target_f, target_list)
+                hidden_list = []
+                target_list = []
         total_time = time.time() - start_time
+    if len(hidden_list)!=0:
+        hidden_list = np.concatenate(hidden_list, axis=0)
+        target_list = np.concatenate(target_list, axis=0)
+        hidden_f = os.path.join(args.save_dir, 'hidden_{}.npy'.format(cnt//segment + 1))
+        target_f = os.path.join(args.save_dir, 'target_{}.npy'.format(cnt//segment + 1))
+        np.save(hidden_f, hidden_list)
+        np.save(target_f, target_list)
     logging('Time : {:.2f}s, {:.2f}ms/segment'.format(
             total_time, 1000 * total_time / (idx+1)))
-    return total_loss / total_len
+    return 0.
 
 # Run on test data.
-if args.split == 'all':
-    test_loss = evaluate(te_iter)
-    valid_loss = evaluate(va_iter)
-elif args.split == 'valid':
-    valid_loss = evaluate(va_iter)
-    test_loss = None
-elif args.split == 'test':
-    test_loss = evaluate(te_iter)
-    valid_loss = None
+train_loss = evaluate(tr_iter)
 
-def format_log(loss, split):
-    if args.dataset in ['enwik8', 'text8']:
-        log_str = '| {0} loss {1:5.2f} | {0} bpc {2:9.5f} '.format(
-            split, loss, loss / math.log(2))
-    else:
-        log_str = '| {0} loss {1:5.2f} | {0} ppl {2:9.3f} '.format(
-            split, loss, math.exp(loss))
-    return log_str
-
-log_str = ''
-if valid_loss is not None:
-    log_str += format_log(valid_loss, 'valid')
-if test_loss is not None:
-    log_str += format_log(test_loss, 'test')
-
-logging('=' * 100)
-logging(log_str)
 logging('=' * 100)

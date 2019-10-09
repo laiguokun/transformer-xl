@@ -27,23 +27,27 @@ def parse_files_to_dataset(parser, file_names, split, num_hosts,
     file_paths = file_names[host_id::num_hosts]
   else:
     file_paths = file_names
-
   tf.logging.info("Host %d handles %d files:", host_id, len(file_paths))
 
-  assert split == "train"
   dataset = tf.data.Dataset.from_tensor_slices(file_paths)
 
-  # file-level shuffle
-  if len(file_paths) > 1:
-    dataset = dataset.shuffle(len(file_paths))
+  if split == "train":
+    # file-level shuffle
+    if len(file_paths) > 1:
+      dataset = dataset.shuffle(len(file_paths))
 
-  # Note: cannot perform sample-level shuffle here because this will violate
-  # the consecutive requirement of data stream.
-  dataset = tf.data.TFRecordDataset(dataset)
+    # Note: cannot perform sample-level shuffle here because this will violate
+    # the consecutive requirement of data stream.
+    dataset = tf.data.TFRecordDataset(dataset)
 
-  dataset = dataset.cache().map(parser).repeat()
-  dataset = dataset.batch(bsz_per_core, drop_remainder=True)
-  dataset = dataset.prefetch(num_core_per_host * bsz_per_core)
+    dataset = dataset.cache().map(parser).repeat()
+    dataset = dataset.batch(bsz_per_core, drop_remainder=True)
+    dataset = dataset.prefetch(num_core_per_host * bsz_per_core)
+  else:
+    dataset = tf.data.TFRecordDataset(dataset)
+    dataset = dataset.map(parser)
+    dataset = dataset.batch(bsz_per_core, drop_remainder=True)
+    dataset = dataset.prefetch(num_core_per_host * bsz_per_core)
 
   return dataset
 
@@ -165,7 +169,7 @@ def get_input_fn(
                     idx, cur_record_info["num_batch"])
     tf.logging.info("[Dir %d] Number of chosen files: %s",
                     idx, len(cur_record_info["filenames"]))
-    tf.logging.info(cur_record_info["filenames"])
+    # tf.logging.info(cur_record_info["filenames"])
 
     # add `cur_record_info` to global `record_info`
     record_info["num_batch"] += cur_record_info["num_batch"]
@@ -175,7 +179,7 @@ def get_input_fn(
                   record_info["num_batch"])
   tf.logging.info("Total number of files: %d",
                   len(record_info["filenames"]))
-  tf.logging.info(record_info["filenames"])
+  # tf.logging.info(record_info["filenames"])
 
   kwargs = dict(
       num_hosts=num_hosts,

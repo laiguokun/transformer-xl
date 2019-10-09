@@ -757,7 +757,7 @@ class MemTransformerLM(nn.Module):
         else:
             return [loss] + new_mems
 
-    def forward_renormalize(self, data, target, *mems):
+    def get_hidden_rep(self, data, target, *mems):
         # nn.DataParallel does not allow size(0) tensors to be broadcasted.
         # So, have to initialize size(0) mems inside the model forward.
         # Moreover, have to return new_mems to allow nn.DataParallel to piece
@@ -766,24 +766,28 @@ class MemTransformerLM(nn.Module):
 
         tgt_len = target.size(0)
         hidden, new_mems = self._forward(data, mems=mems)
-
         pred_hid = hidden[-tgt_len:]
-        if self.sample_softmax > 0 and self.training:
-            assert self.tie_weight
-            logit = sample_logits(self.word_emb,
-                self.out_layer.bias, target, pred_hid, self.sampler)
-            loss = -F.log_softmax(logit, -1)[:, :, 0]
-        else:
-            loss, out_logit = self.crit.forward_renormalize(
-                pred_hid.view(-1, pred_hid.size(-1)), 
-                target.view(-1))
-            loss = loss.view(tgt_len, -1)
-            out_logit = out_logit.view(tgt_len, target.size(1), -1)
-            
         if new_mems is None:
-            return [loss] + [out_logit]
+            return [pred_hid]
         else:
-            return [loss] + new_mems + [out_logit]
+            return [pred_hid] + new_mems
+
+
+    def crit_with_knn(self, hidden, target, knnp, lamb):
+        hidden = hidden.view(-1, hidden.size(-1))
+        knnp = knnp.view(-1, knnp.size(-1))
+        loss = self.crit.forward_with_knn(hidden, target.view(-1), knnp, lamb)
+        return loss
+
+class EvalModel(nn.Module):
+    def __init__(self, model):
+        super(EvalModel, self).__init__()
+        self.model = model
+    
+    def forward(self, data, target, *mems):
+        ret = self.model.get_hidden_rep(data, target, *mems)
+        return ret
+
 
 if __name__ == '__main__':
     import argparse
