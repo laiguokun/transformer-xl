@@ -21,6 +21,6 @@ python validate_transfer.py \
     --dropout=${dropout} \
     --dropatt=${dropatt} \
     --tokenizer_type=whitespace \
-    --tokenizer_path=${HOME}/data/mt/vocab.txt \
-    --init_checkpoint=${HOME}/data/mt/ckpt/model_500K/model.ckpt-0 \
+    --tokenizer_path=./data/vocab.txt \
+    --init_checkpoint=./ckpt/model_500K/model.ckpt-0 \
     ${@}
