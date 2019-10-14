@@ -37,6 +37,32 @@ elif [[ $1 == 'eval' ]]; then
         --same_length \
         --split test \
         ${@:2}
+elif [[ $1 == 'get_hidden' ]]; then
+    echo 'get hidden rep'
+    python get_hidden_rep.py \
+        --cuda \
+        --data ../data/wikitext-103-sp/ \
+        --dataset wt103 \
+        --tgt_len 384 \
+        --mem_len 384 \
+        --batch_size 64 \
+        --clamp_len 400 \
+        --same_length \
+        ${@:2}
+elif [[ $1 == 'eval_knn' ]]; then
+    echo 'eval knn'
+    python evalwknn.py \
+        --cuda \
+        --data ../data/wikitext-103-sp/ \
+        --dataset wt103 \
+        --tgt_len 64 \
+        --mem_len 640 \
+        --batch_size 10 \
+        --clamp_len 400 \
+        --same_length \
+        --split test \
+        --no_log \
+        ${@:2}
 else
     echo 'unknown argment 1'
 fi

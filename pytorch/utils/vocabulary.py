@@ -76,6 +76,8 @@ class Vocab(object):
             print('building vocab from {}'.format(self.vocab_file))
             self._build_from_file(self.vocab_file)
             print('final vocab size {}'.format(len(self)))
+            for sym in self.special:
+                self.add_special(sym)
         else:
             print('building vocab with min_freq={}, max_size={}'.format(
                 self.min_freq, self.max_size))
@@ -91,26 +93,7 @@ class Vocab(object):
 
             print('final vocab size {} from {} unique tokens'.format(
                 len(self), len(self.counter)))
-
-    def build_renormalize_vocab(self, path):
-        print('loading renormalizing vocab')
-        fn = os.path.join(path, 'head-end-vocab.pt')
-        v = torch.load(fn)
-        head_vocab = v['head_vocab']
-        end_vocab = v['end_vocab']
-        head_vocab = self.convert_to_tensor(head_vocab)
-        end_vocab = self.convert_to_tensor(end_vocab)
-        self.head_vocab = self.convert_to_idx_tensor(head_vocab)
-        self.end_vocab = self.convert_to_idx_tensor(end_vocab)
-        if ('<eos>' in self.sym2idx):
-            self.end_vocab[self.sym2idx['<eos>']] = 1
-            self.head_vocab[self.sym2idx['<eos>']] = 1
-
-    def convert_to_idx_tensor(self, idx):
-        ret = torch.zeros(len(self.idx2sym)).long()
-        ret[idx] = 1
-        return ret
-        
+   
     def encode_file(self, path, ordered=False, verbose=False, add_eos=True,
             add_double_eos=False):
         if verbose: print('encoding file {} ...'.format(path))
@@ -126,64 +109,6 @@ class Vocab(object):
         if ordered:
             encoded = torch.cat(encoded)
         return encoded
-
-    def encode_file_renormalize(self, path, path_next_word, ordered=False, verbose=False, 
-            add_eos=True, add_double_eos=False):
-        if verbose: print('encoding file {} ...'.format(path))
-        assert os.path.exists(path)
-        encoded_symbols = []
-        encoded_candidates = []
-        encoded_end_marks = []
-        with open(path, 'r', encoding='utf-8') as f:
-            next_word_set = torch.load(path_next_word)
-            for idx, line in enumerate(f):
-                if verbose and idx > 0 and idx % 500000 == 0:
-                    print('    line {}'.format(idx))
-                symbols = self.tokenize(line, add_eos=add_eos,
-                    add_double_eos=add_double_eos)
-                symbols = self.convert_to_tensor(symbols)
-                candidates =  [self.convert_to_tensor(tokens)
-                                    for tokens in next_word_set[idx]]
-                if add_eos:
-                    candidates.append([])
-                assert symbols.size(0) == len(candidates)
-                end_mark = self.get_end_marks(symbols)
-                #end_cnt += end_mark.sum()
-                #tot_cnt += symbols.size(0)
-                encoded_symbols.append(symbols)
-                encoded_candidates.append(candidates)
-                encoded_end_marks.append(end_mark)
-                #sanity-check: pass
-                #assert self.sanity_check(symbols, candidates, end_mark)
-        encoded = [encoded_symbols, encoded_candidates, encoded_end_marks]
-        if ordered:
-            encoded[0] = torch.cat(encoded[0])
-            encoded[1] = [item for sublist in encoded_candidates for item in sublist]
-            encoded[2] = torch.cat(encoded[2])
-        #print(end_cnt.item() / tot_cnt)
-        return encoded
-
-    def get_end_marks(self, symbols):
-        ret = torch.zeros_like(symbols).long()
-        for idx in range(symbols.size(0)):
-            if self.end_vocab[symbols[idx]] == 1:
-                ret[idx] = 1
-        return ret
-
-    def sanity_check(self, symbols, candidates, end_mark):
-        for i in range(symbols.size(0) - 1):
-            token1 = symbols[i]
-            token2 = symbols[i+1]
-            if end_mark[i] == 1 and self.head_vocab[token2] == True:
-                continue
-            s = set(candidates[i].tolist())
-            if token2.item() in s:
-                continue
-            print(end_mark[i])
-            print(self.convert_to_sent(symbols))
-            print(i, token2, s)
-            return False
-        return True
 
     def encode_sents(self, sents, ordered=False, verbose=False):
         if verbose: print('encoding {} sents ...'.format(len(sents)))
