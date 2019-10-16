@@ -3,7 +3,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import re
 import functools
 
 from absl import flags
@@ -72,29 +71,32 @@ def safe_softmax(inputs, *args, **kwargs):
 layer_norm = safe_precision(tf.contrib.layers.layer_norm)
 
 
-def sinusoid_positional_encoding(seq_len, d_model, bsz=None, clamp_len=-1,
-                                 dtype=tf.float32):
+def sinusoid_positional_encoding(seq_len, d_model, pos_seq=None, bsz=None,
+                                 clamp_len=-1, dtype=tf.float32):
   """create relative positional encoding."""
   assert d_model % 2 == 0, "`d_model` must be an even number."
 
-  pos_seq = tf.range(0, seq_len, 1.0)
-  freq_seq = tf.cast(tf.range(0, d_model, 2.0), dtype=dtype)
+  if pos_seq is None:
+    pos_seq = tf.range(0, seq_len, 1.0)[None]
+
+  half_dim = d_model // 2
+  freq_seq = tf.cast(tf.range(0, half_dim, 1.0), dtype=dtype)
   if dtype is not None and dtype != tf.float32:
     freq_seq = tf.cast(freq_seq, dtype=dtype)
-  inv_freq = 1 / (10000 ** (freq_seq / d_model))
+  inv_freq = 1 / (10000 ** (freq_seq / half_dim))
 
   # type cast
-  if dtype is not None and dtype != tf.float32:
+  if dtype is not None and pos_seq.dtype != dtype:
     pos_seq = tf.cast(pos_seq, dtype=dtype)
 
   # clamp maximum length
   if clamp_len > 0:
     pos_seq = tf.clip_by_value(pos_seq, -clamp_len, clamp_len)
 
-  sinusoid_inp = tf.einsum("i,d->id", pos_seq, inv_freq)
+  sinusoid_inp = tf.einsum("bi,d->bid", pos_seq, inv_freq)
   pos_emb = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], -1)
-  pos_emb = pos_emb[None, :, :]
-  if bsz is not None:
+
+  if bsz is not None and pos_seq is None:
     length = tf.shape(pos_emb)[1]
     pos_emb = tf.broadcast_to(pos_emb, [bsz, length, d_model])
 
@@ -205,16 +207,15 @@ def embedding_lookup(x, n_token, d_embed, initializer, lookup_table=None,
     return output, lookup_table
 
 
-def causal_attn_mask(qlen, mlen, dtype=tf.float32, same_length=False):
+def causal_attn_mask(qlen, mlen=None, dtype=tf.float32):
   """create causal attention mask."""
   attn_mask = tf.ones([qlen, qlen], dtype=dtype)
-  mask_u = tf.matrix_band_part(attn_mask, 0, -1)
+  mask_up_tri = tf.matrix_band_part(attn_mask, 0, -1)
   mask_dia = tf.matrix_band_part(attn_mask, 0, 0)
-  attn_mask_pad = tf.zeros([qlen, mlen], dtype=dtype)
-  ret = tf.concat([attn_mask_pad, mask_u - mask_dia], 1)
-  if same_length:
-    mask_l = tf.matrix_band_part(attn_mask, -1, 0)
-    ret = tf.concat([ret[:, :qlen] + mask_l - mask_dia, ret[:, qlen:]], 1)
+  ret = mask_up_tri - mask_dia
+  if mlen is not None:
+    attn_mask_pad = tf.zeros([qlen, mlen], dtype=dtype)
+    ret = tf.concat([attn_mask_pad, ret], 1)
 
   return ret
 
@@ -319,7 +320,7 @@ def abs_attn_core(q_head, k_head, v_head, attn_mask, dropatt, is_training,
 
 def multihead_attn(q, k, v, attn_mask, d_model, n_head, d_head, dropout,
                    dropatt, is_training, kernel_initializer, residual=True,
-                   scope="abs_attn", reuse=None):
+                   reuse=None, scope="abs_attn"):
   """Standard multi-head attention with absolute positional embedding."""
   monitor_dict = {}
 

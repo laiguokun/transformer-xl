@@ -96,8 +96,8 @@ FLAGS = flags.FLAGS
 
 def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
              is_training, word_embed_table=None, type_embed_table=None,
-             clamp_len=-1, use_tpu=True, return_embed_table=False, reuse=False,
-             scope="input"):
+             pos_seq=None, clamp_len=-1, use_tpu=True, return_embed_table=False,
+             reuse=False, scope="input"):
   """Input layer for TFM used in machine translation."""
   tf_float = tf.bfloat16 if FLAGS.use_bfloat16 else tf.float32
   tf.logging.info("===== Transformer =====")
@@ -146,7 +146,8 @@ def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
     ##### Absolute positional embedding
     with tf.variable_scope("pos_embedding", reuse=reuse):
       pos_emb = sinusoid_positional_encoding(
-          seq_len, d_embed, clamp_len=clamp_len, dtype=tf_float)
+          seq_len, d_embed, pos_seq=pos_seq, clamp_len=clamp_len,
+          dtype=tf_float)
       word_emb += pos_emb
 
     ##### Dropout
@@ -295,13 +296,14 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
 
 def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
             tie_weight=False, hidden_mapping=None, target_mapping=None,
-            return_logits=False, use_tpu=False):
+            label_smooth=None, return_logits=False, use_tpu=False):
   """Compute language modeling cross entropy loss."""
 
   tf.logging.info("===== Language model loss =====")
   tf.logging.info("  - tie_weight %s", tie_weight)
   tf.logging.info("  - hidden_mapping %s", hidden_mapping)
   tf.logging.info("  - target_mapping %s", target_mapping)
+  tf.logging.info("  - label_smooth %s", label_smooth)
   tf.logging.info("  - lm_proj %s", FLAGS.lm_proj)
   tf.logging.info("===============================")
 
@@ -340,16 +342,28 @@ def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
       logits = tf.cast(logits, tf.float32)
 
     if use_tpu:
-      one_hot_target = tf.one_hot(target, n_token, dtype=logits.dtype)
-      loss = -tf.reduce_sum(tf.nn.log_softmax(logits) * one_hot_target, -1)
+      onehot_target = tf.one_hot(target, n_token, dtype=logits.dtype)
+      nll = -tf.reduce_sum(tf.nn.log_softmax(logits) * onehot_target, -1)
+      if label_smooth is not None:
+        smooth_target = (onehot_target * (1 - label_smooth) +
+                         label_smooth / n_token)
+        loss = -tf.reduce_sum(tf.nn.log_softmax(logits) * smooth_target, -1)
+      else:
+        loss = nll
     else:
-      loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target,
-                                                            logits=logits)
+      nll = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target,
+                                                           logits=logits)
+      if label_smooth is not None:
+        onehot_target = tf.one_hot(target, n_token, dtype=logits.dtype)
+        loss = tf.losses.softmax_cross_entropy(onehot_labels=onehot_target,
+                                               logits=logits)
+      else:
+        loss = nll
 
     if return_logits:
-      return loss, logits
+      return loss, nll, logits
     else:
-      return loss
+      return loss, nll
 
 
 def summarize_sequence(summary_type, hidden, d_model, n_head, d_head, dropout,

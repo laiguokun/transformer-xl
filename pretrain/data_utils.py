@@ -4,6 +4,7 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import multiprocessing
 
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
@@ -78,6 +79,19 @@ def format_filename(prefix, suffix, seq_len, uncased=False):
   return file_name
 
 
+def seq2seq_filename(prefix, suffix, uncased=False):
+  """docs."""
+  if not uncased:
+    case_str = ""
+  else:
+    case_str = "uncased."
+
+  file_name = "{}.{}{}".format(
+      prefix, case_str, suffix)
+
+  return file_name
+
+
 def type_cast(example, use_bfloat16=False):
   """Cast int64 into int32 and float32 to bfloat16 if use_bfloat16."""
   for key in list(example.keys()):
@@ -90,3 +104,11 @@ def type_cast(example, use_bfloat16=False):
       val = tf.cast(val, tf.bfloat16)
 
     example[key] = val
+
+  return example
+
+
+def cpu_count():
+  """Return the number of available cores."""
+  num_available_cores = multiprocessing.cpu_count()
+  return num_available_cores

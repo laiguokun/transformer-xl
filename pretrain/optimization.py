@@ -136,6 +136,8 @@ def get_train_op(total_loss):
     assert FLAGS.weight_decay == 0, "Use adamw for weight decay"
     optimizer = tf.train.AdamOptimizer(
         learning_rate=learning_rate,
+        beta1=FLAGS.adam_beta1,
+        beta2=FLAGS.adam_beta2,
         epsilon=FLAGS.adam_epsilon)
   elif FLAGS.optimizer == "lamb":
     if FLAGS.adam_correction:

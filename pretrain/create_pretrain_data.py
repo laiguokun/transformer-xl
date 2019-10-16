@@ -166,15 +166,15 @@ def _create_data(input_paths, tokenizer):
 
   # concat into a flat np.ndarray
   input_data = np.concatenate([input_shards[idx] for idx in perm_indices])
-  create_seq2seq_tfrecords(
+  create_pretrain_tfrecords(
       save_dir=FLAGS.save_dir,
       data=input_data,
       tokenizer=tokenizer,
   )
 
 
-def create_seq2seq_tfrecords(save_dir, data, tokenizer):
-  """create seq2seq tfrecords from numpy array."""
+def create_pretrain_tfrecords(save_dir, data, tokenizer):
+  """create pretrain tfrecords from numpy array."""
   # Notes:
   # - Each sequence is formatted as [<eos> A <eos>] sharing the same type_id
 
