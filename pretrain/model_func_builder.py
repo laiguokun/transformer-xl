@@ -236,7 +236,7 @@ def extract_hiddens(inputs, type_id, n_token, is_training):
 
 @bf16_decorator
 def joint_loss(features, labels, n_token, is_training):
-  """Standard MLM loss as in BERT."""
+  """Decoder only seq2seq."""
   del labels
 
   initializer = _get_initializer()
@@ -298,16 +298,16 @@ def joint_loss(features, labels, n_token, is_training):
   perm_mask = tf.cast(perm_mask, tf_float)
 
   # padding
-  non_pad_mask = tf.equal(target_seg, 0)
+  non_pad_mask = tf.not_equal(target_seg, 0)
   all_eos = tf.constant(FLAGS.eos_id, shape=target.shape, dtype=target.dtype)
   # Replace all <pad> (/P) with <eos> (/S)
   #   - target : /S a1 a2 a3 /S b1 b2 /S c1 c2 /P /P
   #   - tmptgt : /S a1 a2 a3 /S b1 b2 /S c1 c2 /S /S
   tmptgt = tf.where(non_pad_mask, target, all_eos)
-  # Shift the `tmptgt` to form the (next-step) prediction `labels`
-  #   - target : \S a1 a2 a3 \S b1 b2 \S c1 c2 \P \P
-  #   - labels : a1 a2 a3 \S b1 b2 \S c1 c2 \S \S \S
-  labels = tf.concat([tmptgt[:, 1:], tmptgt[:, :1]], axis=1)
+  # Shift the `tmptgt` to form the (next-step) prediction target
+  #   - target   : \S a1 a2 a3 \S b1 b2 \S c1 c2 \P \P
+  #   - pred_tgt : a1 a2 a3 \S b1 b2 \S c1 c2 \S \S \S
+  pred_tgt = tf.concat([tmptgt[:, 1:], tmptgt[:, :1]], axis=1)
   loss_mask = tf.cast(non_pad_mask, tf.float32)
 
   #### Transformer Model
@@ -335,7 +335,7 @@ def joint_loss(features, labels, n_token, is_training):
 
     lm_loss, nll_loss = model.lm_loss(
         hidden=tgt_out,
-        target=labels,
+        target=pred_tgt,
         n_token=n_token,
         d_model=FLAGS.d_model,
         initializer=initializer,

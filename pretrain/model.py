@@ -39,6 +39,8 @@ flags.DEFINE_enum("input_proc", "inv_sqrt", ["inv_sqrt", "layer_norm"],
                   help="How to preprocess input.")
 flags.DEFINE_bool("lm_proj", False,
                   help="Whether to use another projection before the LM loss.")
+flags.DEFINE_bool("softmax_bias", False,
+                  help="Whether to add softmax bias for the distribution.")
 
 # Size
 flags.DEFINE_integer("n_layer", default=6,
@@ -104,6 +106,7 @@ def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
   tf.logging.info("Input related:")
   tf.logging.info("  - inputs %s", inputs)
   tf.logging.info("  - type_id %s", type_id)
+  tf.logging.info("  - pos_seq %s", pos_seq)
   tf.logging.info("Hparam related:")
   tf.logging.info("  - n_type %s", n_type)
   tf.logging.info("  - n_token %s", n_token)
@@ -333,10 +336,12 @@ def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
       softmax_w = tf.get_variable("weight", [n_token, d_model],
                                   dtype=hidden.dtype, initializer=initializer)
 
-    softmax_b = tf.get_variable("bias", [n_token], dtype=hidden.dtype,
-                                initializer=tf.zeros_initializer())
+    logits = tf.einsum("bid,nd->bin", hidden, softmax_w)
+    if FLAGS.softmax_bias:
+      softmax_b = tf.get_variable("bias", [n_token], dtype=hidden.dtype,
+                                  initializer=tf.zeros_initializer())
+      logits += softmax_b
 
-    logits = tf.einsum("bid,nd->bin", hidden, softmax_w) + softmax_b
     if logits.dtype != tf.float32:
       # Always use float32 for LM loss
       logits = tf.cast(logits, tf.float32)

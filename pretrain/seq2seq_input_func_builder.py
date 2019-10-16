@@ -287,7 +287,7 @@ def get_input_fn(
   kwargs = dict(
       data_files=record_info["filenames"],
       num_hosts=num_hosts,
-      is_training=False, #split == "train",
+      is_training=split == "train",
       max_length=max_length,
       num_threads=num_threads,
       use_bfloat16=use_bfloat16)
