@@ -7,6 +7,7 @@ from absl import app
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
+import os
 import numpy as np
 
 # pylint: disable=g-import-not-at-top
@@ -21,7 +22,7 @@ try:
   run_internal = True
 except ImportError as e:
   import tensorflow as tf
-  import input_func_builder
+  import lm_input_func_builder as input_func_builder
   import model_func_builder
   import model_utils
   import optimization
@@ -64,8 +65,6 @@ flags.DEFINE_string("semi_dir", default=None,
                     help="Path to directory containing semi-doc tfrecord.")
 flags.DEFINE_string("model_dir", default=None,
                     help="Estimator model_dir.")
-flags.DEFINE_string("init_checkpoint", default=None,
-                    help="Checkpoint path for initializing the model.")
 
 # Training config
 flags.DEFINE_bool("do_train", True,
@@ -81,10 +80,13 @@ flags.DEFINE_integer("save_steps", default=None,
                      "None for not saving checkpoints")
 flags.DEFINE_integer("max_save", default=100000,
                      help="Maximum number of checkpoints to save.")
-flags.DEFINE_bool("use_bfloat16", False,
-                  help="Whether to use bfloat16.")
-flags.DEFINE_bool("float32_softmax", True,
-                  help="Whether to use float32 for softmax.")
+flags.DEFINE_string("init_checkpoint", default=None,
+                    help="Checkpoint path for initializing the model.")
+flags.DEFINE_string("warm_start_path", default=None,
+                    help="Checkpoint path for warm start."
+                    "If set, will clear Adam states."
+                    "Note that the new model_dir should be different "
+                    "from `warm_start_path`.")
 
 # Evaluation config
 flags.DEFINE_bool("do_eval", False,
@@ -98,15 +100,28 @@ flags.DEFINE_string("eval_ckpt_path", default=None,
 flags.DEFINE_integer("eval_steps", default=None,
                      help="Number of evaluation steps to run.")
 
-# Data config
+##### Data config
 flags.DEFINE_integer("seq_len", default=512,
                      help="Sequence length for pretraining.")
+
+##### Loss related
+flags.DEFINE_bool("tie_weight", default=True,
+                  help="Tie embeddings.")
+
+##### Precision
+flags.DEFINE_bool("use_bfloat16", default=False,
+                  help="Whether to use bfloat16.")
+flags.DEFINE_bool("float32_softmax", default=True,
+                  help="Whether to use float32 softmax.")
+
+##### Monitoring
+flags.DEFINE_integer("log_freq", default=100, help="log frequence.")
 
 
 FLAGS = flags.FLAGS
 
 
-def get_model_fn():
+def get_model_fn(n_token):
   """doc."""
   def model_fn(features, labels, mode, params):
     """doc."""
@@ -123,7 +138,7 @@ def get_model_fn():
 
     #### Get loss from inputs
     total_loss, new_mems, monitor_dict = model_func_builder.get_lm_loss(
-        features, mems, is_training)
+        features, mems, n_token, is_training)
 
     #### Put `new_mems` into `new_cache`
     new_cache = []
@@ -157,7 +172,37 @@ def get_model_fn():
     monitor_dict.update(optim_dict)
 
     #### Customized initial checkpoint
-    scaffold_fn = model_utils.init_from_checkpoint(global_vars=True)
+    tvars = tf.global_variables()
+    initialized_variable_names = {}
+    scaffold_fn = None
+    if FLAGS.init_checkpoint is not None:
+      if FLAGS.init_checkpoint.endswith("latest"):
+        ckpt_dir = os.path.dirname(FLAGS.init_checkpoint)
+        init_checkpoint = tf.train.latest_checkpoint(ckpt_dir)
+      else:
+        init_checkpoint = FLAGS.init_checkpoint
+
+      tf.logging.info("Initialize from the ckpt %s", init_checkpoint)
+
+      (assignment_map, initialized_variable_names
+      ) = model_utils.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
+      if FLAGS.use_tpu:
+        def tpu_scaffold():
+          tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+          return tf.train.Scaffold()
+
+        scaffold_fn = tpu_scaffold
+      else:
+        tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+
+      # Log customized initialization
+      tf.logging.info("**** Global Variables ****")
+      for var in tvars:
+        init_string = ""
+        if var.name in initialized_variable_names:
+          init_string = ", *INIT_FROM_CKPT*"
+        tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+                        init_string)
 
     #### Creating host calls
     host_call = model_utils.construct_scalar_host_call(
@@ -212,7 +257,7 @@ def get_input_fn(split):
   else:
     batch_size = FLAGS.eval_batch_size
 
-  input_fn, record_info_dict = input_func_builder.get_input_fn(
+  input_fn = input_func_builder.get_input_fn(
       doc_dir=FLAGS.doc_dir,
       semi_dir=FLAGS.semi_dir,
       sent_dir=FLAGS.sent_dir,
@@ -224,7 +269,7 @@ def get_input_fn(split):
       num_core_per_host=FLAGS.num_core_per_host,
       use_bfloat16=FLAGS.use_bfloat16)
 
-  return input_fn, record_info_dict
+  return input_fn
 
 
 def main(unused_argv):
@@ -232,18 +277,42 @@ def main(unused_argv):
 
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  _ = tokenization.get_tokenizer()
+  tokenizer = tokenization.get_tokenizer()
 
   ##### Get train cache function
   train_cache_fn = get_cache_fn(FLAGS.mem_len)
   eval_cache_fn = get_cache_fn(FLAGS.mem_len)
 
   ##### Get model function
-  model_fn = get_model_fn()
+  model_fn = get_model_fn(tokenizer.get_vocab_size())
 
   ##### Create TPUEstimator
   # TPU Configuration
-  run_config = model_utils.configure_tpu(run_internal)
+  if not run_internal and FLAGS.use_tpu:
+    tpu_cluster = tf.contrib.cluster_resolver.TPUClusterResolver(
+        FLAGS.tpu, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
+  else:
+    tpu_cluster = None
+
+  per_host_input = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
+  run_config = tf.contrib.tpu.RunConfig(
+      cluster=tpu_cluster,
+      master=FLAGS.master,
+      model_dir=FLAGS.model_dir,
+      session_config=tf.ConfigProto(allow_soft_placement=True),
+      tpu_config=tf.contrib.tpu.TPUConfig(
+          iterations_per_loop=FLAGS.iterations,
+          per_host_input_for_training=per_host_input),
+      keep_checkpoint_max=FLAGS.max_save,
+      save_checkpoints_secs=None,
+      save_checkpoints_steps=FLAGS.save_steps
+  )
+
+  # warm start
+  warm_start_from = None
+  if FLAGS.warm_start_path is not None:
+    warm_start_from = tf.estimator.WarmStartSettings(
+        ckpt_to_initialize_from=FLAGS.warm_start_path)
 
   # TPU Estimator
   estimator = tpu_estimator.TPUEstimator(
@@ -254,30 +323,22 @@ def main(unused_argv):
       config=run_config,
       train_batch_size=FLAGS.train_batch_size,
       eval_batch_size=FLAGS.eval_batch_size,
-      eval_on_tpu=FLAGS.use_tpu)
+      eval_on_tpu=FLAGS.use_tpu,
+      warm_start_from=warm_start_from)
 
   ##### Training
   if FLAGS.do_train:
     # Get train input function
-    train_input_fn, train_record_info_dict = get_input_fn("train")
-    tf.logging.info("num of train batches %d",
-                    train_record_info_dict["num_batch"])
+    train_input_fn = get_input_fn("train")
 
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.train_steps)
 
   #### Evaluation
   if FLAGS.do_eval:
     # Get eval input function
-    eval_input_fn, eval_record_info_dict = get_input_fn(FLAGS.eval_split)
-    num_eval_batch = eval_record_info_dict["num_batch"]
-    tf.logging.info("num of eval batches %d", num_eval_batch)
+    eval_input_fn = get_input_fn(FLAGS.eval_split)
 
-    if FLAGS.eval_steps is not None:
-      eval_steps = min(num_eval_batch, FLAGS.eval_steps)
-    else:
-      eval_steps = num_eval_batch
-
-    estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps,
+    estimator.evaluate(input_fn=eval_input_fn, steps=FLAGS.eval_steps,
                        checkpoint_path=FLAGS.eval_ckpt_path)
 
 
