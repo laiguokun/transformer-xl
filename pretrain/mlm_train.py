@@ -20,8 +20,9 @@ try:
 
   import google3.experimental.users.zihangd.pretrain.model_utils as model_utils
   import google3.experimental.users.zihangd.pretrain.optimization as optimization
+  import google3.experimental.users.zihangd.pretrain.tpu_estimator_new as tpu_estimator
   import google3.experimental.users.zihangd.pretrain.model_func_builder as model_func_builder
-  import google3.experimental.users.zihangd.pretrain.seq2seq_input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.mlm_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 
   run_internal = True
@@ -29,8 +30,9 @@ except ImportError as e:
   import tensorflow as tf
   import model_utils
   import optimization
+  import tpu_estimator_new as tpu_estimator
   import model_func_builder
-  import seq2seq_input_func_builder as input_func_builder
+  import mlm_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 
   run_internal = False
@@ -62,8 +64,12 @@ flags.DEFINE_bool("verbose", default=False,
                   help="Whether to print additional information.")
 
 # Experiment (data/checkpoint/directory) config
-flags.DEFINE_string("record_dir", default=None,
-                    help="Path to local directory containing tfrecord.")
+flags.DEFINE_string("doc_dir", default=None,
+                    help="Path to directory containing doc tfrecord.")
+flags.DEFINE_string("sent_dir", default=None,
+                    help="Path to directory containing sent tfrecord.")
+flags.DEFINE_string("semi_dir", default=None,
+                    help="Path to directory containing semi-doc tfrecord.")
 flags.DEFINE_string("model_dir", default=None,
                     help="Estimator model_dir.")
 flags.DEFINE_bool("overwrite", default=False,
@@ -89,6 +95,8 @@ flags.DEFINE_integer("save_steps", default=10000,
                      help="Number of steps for model checkpointing.")
 flags.DEFINE_integer("max_save", default=100000,
                      help="Maximum number of checkpoints to save.")
+flags.DEFINE_string("loss_type", default="mlm",
+                    help="Type of the loss to use.")
 
 # Evaluation config
 flags.DEFINE_bool("do_eval", default=False,
@@ -104,12 +112,14 @@ flags.DEFINE_integer("max_eval_batch", default=-1,
 flags.DEFINE_integer("start_eval_steps", default=200000,
                      help="Which checkpoint to start with in `do_eval_only` "
                      "mode.")
-flags.DEFINE_string("eval_split", default="valid",
+flags.DEFINE_string("eval_split", default="dev",
                     help="Which data split to evaluate.")
 
 ##### Data config
-flags.DEFINE_integer("max_length", default=0,
-                     help="Max length for source and target.")
+flags.DEFINE_integer("seq_len", default=0,
+                     help="tgt len for objective; 0 for not using it")
+flags.DEFINE_integer("num_predict", default=None,
+                     help="Number of masked tokens.")
 
 ##### Loss related
 flags.DEFINE_bool("tie_weight", default=True,
@@ -117,8 +127,6 @@ flags.DEFINE_bool("tie_weight", default=True,
 flags.DEFINE_bool("attn_to_mask", default=True,
                   help="For MLM loss, whether to allow model to attend "
                   "the positions with [mask] tokens.")
-flags.DEFINE_float("label_smooth", default=0.1,
-                   help="Label smoothing.")
 
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
@@ -148,9 +156,26 @@ def get_model_fn(n_token):
     #### Training or Evaluation
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
+    #### Retrieve `mems` from `params["cache"]`
+    mems = {}
+    idx = 0
+    for obj_len, key in zip([FLAGS.seq_len], ["mems"]):
+      if obj_len > 0 and FLAGS.mem_len > 0:
+        n_layer = FLAGS.n_layer
+        if FLAGS.use_extra_layer:
+          n_layer += 1
+        mems[key] = params["cache"][idx*n_layer: (idx+1)*n_layer]
+        idx += 1
+
     #### Get loss from inputs
-    total_loss, monitor_dict = model_func_builder.joint_loss(
-        features, labels, n_token, is_training)
+    total_loss, new_mems, monitor_dict = model_func_builder.get_loss(
+        features, labels, mems, n_token, is_training)
+
+    #### Turn `new_mems` into `new_cache`
+    new_cache = []
+    for obj_len, key in zip([FLAGS.seq_len], ["mems"]):
+      if obj_len > 0 and FLAGS.mem_len > 0:
+        new_cache += new_mems[key]
 
     #### Check model parameters
     num_params = sum([np.prod(v.shape) for v in tf.trainable_variables()])
@@ -170,11 +195,13 @@ def get_model_fn(n_token):
         total_loss = total_loss / FLAGS.num_hosts / FLAGS.num_core_per_host
       metric_loss = tf.reshape(total_loss, [1])
 
-      #### Constructing evaluation TPUEstimatorSpec.
+      #### Constructing evaluation TPUEstimatorSpec with new cache.
       eval_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
           eval_metrics=(metric_fn, [metric_loss]))
+
+      eval_spec.cache = new_cache
 
       return eval_spec
 
@@ -223,30 +250,64 @@ def get_model_fn(n_token):
         reduce_fn=tf.reduce_mean,
         log_freq=FLAGS.log_freq)
 
-    #### Constructing training TPUEstimatorSpec.
+    #### Constructing training TPUEstimatorSpec with new cache.
     train_spec = tf.contrib.tpu.TPUEstimatorSpec(
         mode=mode, loss=total_loss, train_op=train_op, host_call=host_call,
         scaffold_fn=scaffold_fn)
+
+    train_spec.cache = new_cache
 
     return train_spec
 
   return model_fn
 
 
+def get_cache_fn(mem_len):
+  """doc."""
+  tf_float = tf.bfloat16 if FLAGS.use_bfloat16 else tf.float32
+  def cache_fn(batch_size):
+    """Call back function used to create initial cache in TPUEstimator."""
+    mems = []
+    for obj_len in [FLAGS.seq_len]:
+      if obj_len > 0:
+        for _ in range(FLAGS.n_layer + int(FLAGS.use_extra_layer)):
+          zeros = tf.zeros(
+              [batch_size, mem_len, FLAGS.d_model],
+              dtype=tf_float)
+          mems.append(zeros)
+
+    return mems
+
+  if mem_len > 0:
+    return cache_fn
+  else:
+    return None
+
+
 def get_input_fn(split):
   """doc."""
+  if split == "train":
+    batch_size = FLAGS.train_batch_size
+  else:
+    batch_size = FLAGS.eval_batch_size
+
   kwargs = dict(
-      tfrecord_dir=FLAGS.record_dir,
+      doc_dir=FLAGS.doc_dir,
+      semi_dir=FLAGS.semi_dir,
+      sent_dir=FLAGS.sent_dir,
       split=split,
-      max_length=FLAGS.max_length,
-      num_hosts=FLAGS.num_hosts,
       uncased=FLAGS.uncased,
+      seq_len=FLAGS.seq_len,
+      num_predict=FLAGS.num_predict,
+      bsz_per_host=batch_size // FLAGS.num_hosts,
+      num_hosts=FLAGS.num_hosts,
+      num_core_per_host=FLAGS.num_core_per_host,
       use_bfloat16=FLAGS.use_bfloat16,
   )
 
-  input_fn, meta_dict = input_func_builder.get_input_fn(**kwargs)
+  input_fn = input_func_builder.get_input_fn(**kwargs)
 
-  return input_fn, meta_dict
+  return input_fn
 
 
 def main(unused_argv):
@@ -258,6 +319,8 @@ def main(unused_argv):
   if FLAGS.save_steps == 0:
     FLAGS.save_steps = None
 
+  assert FLAGS.seq_len > 0
+
   #### Tokenizer
   tokenizer = get_tokenizer()
 
@@ -267,19 +330,23 @@ def main(unused_argv):
 
   if FLAGS.do_train:
     # Get train input function
-    train_input_fn, train_meta_dict = get_input_fn("train")
-    tf.logging.info("num of train examples %d", train_meta_dict["num_example"])
+    train_input_fn = get_input_fn("train")
+
+    # Get train cache function
+    train_cache_fn = get_cache_fn(FLAGS.mem_len)
+  else:
+    train_cache_fn = None
 
   if FLAGS.do_eval:
     assert FLAGS.num_hosts == 1
     # Get eval input function
-    eval_input_fn, eval_meta_dict = get_input_fn(FLAGS.eval_split)
-    num_eval_batch = eval_meta_dict["num_example"] // FLAGS.eval_batch_size
+    eval_input_fn = get_input_fn(FLAGS.eval_split)
+    tf.logging.info("num of eval batches %d", FLAGS.num_eval_batch)
 
-    if FLAGS.max_eval_batch > 0:
-      num_eval_batch = min(num_eval_batch, FLAGS.max_eval_batch)
-
-    tf.logging.info("num of eval batches %d", num_eval_batch)
+    # Get eval cache function
+    eval_cache_fn = get_cache_fn(FLAGS.mem_len)
+  else:
+    eval_cache_fn = None
 
   ##### Get model function
   model_fn = get_model_fn(n_token)
@@ -313,8 +380,10 @@ def main(unused_argv):
         ckpt_to_initialize_from=FLAGS.warm_start_path)
 
   # TPU Estimator
-  estimator = tf.estimator.tpu.TPUEstimator(
+  estimator = tpu_estimator.TPUEstimator(
       model_fn=model_fn,
+      train_cache_fn=train_cache_fn,
+      eval_cache_fn=eval_cache_fn,
       use_tpu=FLAGS.use_tpu,
       config=run_config,
       params={},
@@ -334,7 +403,8 @@ def main(unused_argv):
         ckpt_dir = os.path.dirname(FLAGS.eval_ckpt_path)
         FLAGS.eval_ckpt_path = tf.train.latest_checkpoint(ckpt_dir)
 
-      ret = estimator.evaluate(input_fn=eval_input_fn, steps=num_eval_batch,
+      ret = estimator.evaluate(input_fn=eval_input_fn,
+                               steps=FLAGS.num_eval_batch,
                                checkpoint_path=FLAGS.eval_ckpt_path)
       tf.logging.info("=" * 200)
       log_str = "Eval results | "
@@ -353,7 +423,8 @@ def main(unused_argv):
             FLAGS.train_steps):
           continue
         tf.logging.info("Evaluate ckpt %d", global_step)
-        ret = estimator.evaluate(input_fn=eval_input_fn, steps=num_eval_batch,
+        ret = estimator.evaluate(input_fn=eval_input_fn,
+                                 steps=FLAGS.num_eval_batch,
                                  checkpoint_path=eval_checkpoint)
         eval_results.append(ret)
 

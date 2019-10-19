@@ -24,7 +24,8 @@ except ImportError as e:
 flags.DEFINE_string("optimizer", default="adamw", help="Optimizer to use")
 
 # learning rate schedule
-flags.DEFINE_float("learning_rate", default=1e-5, help="initial learning rate")
+flags.DEFINE_float("init_lr", default=0, help="initial learning rate.")
+flags.DEFINE_float("learning_rate", default=1e-5, help="maximum learning rate")
 flags.DEFINE_integer("warmup_steps", default=0, help="number of warmup steps")
 flags.DEFINE_string("decay_method", default="poly", help="poly or cos")
 flags.DEFINE_float("min_lr_ratio", default=0.0,
@@ -90,7 +91,7 @@ def get_train_op(total_loss):
   if FLAGS.warmup_steps > 0:
     warmup_lr = (tf.cast(global_step, tf.float32)
                  / tf.cast(FLAGS.warmup_steps, tf.float32)
-                 * FLAGS.learning_rate)
+                 * (FLAGS.learning_rate - FLAGS.init_lr)) + FLAGS.init_lr
   else:
     warmup_lr = 0.0
 
@@ -107,6 +108,10 @@ def get_train_op(total_loss):
         global_step=global_step - FLAGS.warmup_steps,
         decay_steps=FLAGS.train_steps - FLAGS.warmup_steps,
         alpha=FLAGS.min_lr_ratio)
+  elif FLAGS.decay_method == "inv_sqrt":
+    global_step_f32 = tf.cast(global_step, tf.float32)
+    decay_lr = (FLAGS.learning_rate * (FLAGS.warmup_steps ** 0.5) *
+                (global_step_f32 ** -0.5))
   else:
     raise ValueError(FLAGS.decay_method)
 

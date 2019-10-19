@@ -8,12 +8,12 @@ import absl.logging as _logging  # pylint: disable=unused-import
 # pylint: disable=g-import-not-at-top
 try:
   import tensorflow.google as tf
-  import google3.experimental.users.zihangd.pretrain.input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.lm_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 except ImportError as e:
   print(e)
   import tensorflow as tf
-  import input_func_builder as input_func_builder
+  import lm_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 # pylint: enable=g-import-not-at-top
 
@@ -21,19 +21,20 @@ except ImportError as e:
 # tf.enable_eager_execution()
 
 # Experiment (data/checkpoint/directory) paramenters
-flags.DEFINE_string("record_info_dir", default="./proc_data/example/tfrecords",
-                    help="Path to local directory containing *.tfrecord.")
+flags.DEFINE_string("doc_dir", default="",
+                    help="Path to directory containing doc tfrecord.")
+flags.DEFINE_string("sent_dir", default="",
+                    help="Path to directory containing sent tfrecord.")
+flags.DEFINE_string("semi_dir", default="",
+                    help="Path to directory containing semi-doc tfrecord.")
 flags.DEFINE_integer("bsz_per_host", default=32, help="batch size per host.")
 flags.DEFINE_integer("seq_len", default=512,
                      help="tgt len; 0 for not using it")
-flags.DEFINE_integer("num_predict", default=85,
-                     help="Num of tokens to predict.")
 flags.DEFINE_string("split", default="train",
                     help="Data split.")
 flags.DEFINE_integer("num_core_per_host", default=16, help="num core per host")
-flags.DEFINE_integer("num_passes", default=None,
-                     help="Num of passes to use.")
-flags.DEFINE_string("loss_type", "mlm", help="")
+flags.DEFINE_integer("num_example", default=2,
+                     help="Num of examples to see.")
 
 FLAGS = flags.FLAGS
 
@@ -43,17 +44,16 @@ def main(unused_argv):
 
   tokenizer = get_tokenizer()
 
-  input_fn, _ = input_func_builder.get_input_fn(
-      tfrecord_dir=FLAGS.record_info_dir,
+  input_fn = input_func_builder.get_input_fn(
+      doc_dir=FLAGS.doc_dir,
+      semi_dir=FLAGS.semi_dir,
+      sent_dir=FLAGS.sent_dir,
       split=FLAGS.split,
-      bsz_per_host=FLAGS.bsz_per_host,
+      uncased=FLAGS.uncased,
       seq_len=FLAGS.seq_len,
       num_hosts=1,
+      bsz_per_host=FLAGS.bsz_per_host,
       num_core_per_host=FLAGS.num_core_per_host,
-      uncased=FLAGS.uncased,
-      num_passes=FLAGS.num_passes,
-      num_predict=FLAGS.num_predict,
-      loss_type=FLAGS.loss_type
   )
 
   bsz_per_core = FLAGS.bsz_per_host // FLAGS.num_core_per_host
@@ -62,18 +62,25 @@ def main(unused_argv):
   }
 
   dataset = input_fn(params)
-  example = dataset.make_one_shot_iterator().get_next()
+  example = tf.compat.v1.data.make_one_shot_iterator(dataset).get_next()
+  for k, v in example.items():
+    print(k, v.shape)
 
   with tf.Session() as sess:
-    for _ in range(20):
+    for _ in range(FLAGS.num_example):
       example_np = sess.run(example)
       print("=" * 160)
-      if FLAGS.loss_type in ["mlm"]:
-        masked_input = tokenizer.convert_ids_to_tokens(
-            example_np["masked_input"][0].tolist())
-        print(masked_input)
-      # print(example_np["label"][0])
-      # print(example_np["seg_id"][0])
+      for k, v in example_np.items():
+        if v.ndim == 2:
+          for i in range(v.shape[0]):
+            if k in ["inputs", "target"]:
+              text = tokenizer.convert_ids_to_text(v[i].tolist())
+              print("[{}]    {}".format(k, text))
+        else:
+          if k in ["inputs", "target"]:
+            text = tokenizer.convert_ids_to_text(v.tolist())
+            print("[{}]    {}".format(k, text))
+
 
 if __name__ == "__main__":
   tf.app.run()

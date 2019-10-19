@@ -135,7 +135,8 @@ class SequenceDatasetPacker(object):
       # Dataset.window splits nested Tensors.
       re_zip = lambda *x: tf.data.Dataset.zip(x)
       dataset = dataset.window(window_size).map(re_zip).interleave(
-          self._scanning_pack, cycle_length=cycle_length,
+          self._scanning_pack,
+          cycle_length=cycle_length,
           block_length=window_size,
           num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
@@ -262,9 +263,12 @@ class SequenceDatasetPacker(object):
 
     initial_state = self._scan_initial_state()
     step_fn = functools.partial(
-        tf.autograph.to_graph(_scan_step_fn), packed_length=self._packed_length,
-        queue_size=self._queue_size, spacing=self._spacing,
-        num_sequences=self._num_sequences, token_dtype=self._token_dtype)
+        tf.autograph.to_graph(_scan_step_fn),
+        packed_length=self._packed_length,
+        queue_size=self._queue_size,
+        spacing=self._spacing,
+        num_sequences=self._num_sequences,
+        token_dtype=self._token_dtype)
 
     dataset = dataset.apply(tf.data.experimental.scan(initial_state, step_fn))
 

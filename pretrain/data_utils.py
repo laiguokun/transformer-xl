@@ -9,6 +9,7 @@ import multiprocessing
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
+import numpy as np
 import tensorflow as tf
 
 flags.DEFINE_integer("vocab_size", default=None, help="")
@@ -66,20 +67,7 @@ def setup_special_ids(tokenizer, symbols_mapping=None):
       tf.logging.warning("Skip %s: not found in tokenizer's vocab.", sym)
 
 
-def format_filename(prefix, suffix, seq_len, uncased=False):
-  """docs."""
-  if not uncased:
-    case_str = ""
-  else:
-    case_str = "uncased."
-
-  file_name = "{}.seq-{}.{}{}".format(
-      prefix, seq_len, case_str, suffix)
-
-  return file_name
-
-
-def seq2seq_filename(prefix, suffix, uncased=False):
+def format_filename(prefix, suffix, uncased=False):
   """docs."""
   if not uncased:
     case_str = ""
@@ -90,6 +78,16 @@ def seq2seq_filename(prefix, suffix, uncased=False):
       prefix, case_str, suffix)
 
   return file_name
+
+
+def sparse_to_dense(example):
+  for key in list(example.keys()):
+    val = example[key]
+    if tf.keras.backend.is_sparse(val):
+      val = tf.sparse.to_dense(val)
+    example[key] = val
+
+  return example
 
 
 def type_cast(example, use_bfloat16=False):
@@ -112,3 +110,81 @@ def cpu_count():
   """Return the number of available cores."""
   num_available_cores = multiprocessing.cpu_count()
   return num_available_cores
+
+
+def read_sents(file_path, tokenizer):
+  """Read sentences from a file without order or doc structure."""
+  all_sents = []
+  tf.logging.info("===== Processing %s =====", file_path)
+  for line in tf.gfile.Open(file_path):
+    if len(all_sents) % 100000 == 0:
+      tf.logging.info("Loading line %d", len(all_sents))
+
+    cur_sent = tokenizer.convert_text_to_ids(line.strip())
+
+    if FLAGS.add_double_eos:
+      cur_sent = [tokenizer.eos_id] + cur_sent + [tokenizer.eos_id]
+    elif FLAGS.add_eos:
+      cur_sent = cur_sent + [tokenizer.eos_id]
+
+    if not cur_sent:
+      tf.logging.info("Skip line %s --> tokens %s", line.strip(), cur_sent)
+      continue
+
+    all_sents.append(np.array(cur_sent))
+
+  tf.logging.info("Finish %s with %d lines", file_path, len(all_sents))
+
+  return all_sents
+
+
+def read_docs(file_path, tokenizer):
+  """Read docs from a file separated by empty lines."""
+  # working structure used to store each document
+  all_docs = []
+  doc, end_of_doc = [], False
+
+  line_cnt = 0
+  tf.logging.info("Start processing %s", file_path)
+  for line in tf.gfile.Open(file_path):
+    if line_cnt % 100000 == 0:
+      tf.logging.info("Loading line %d", line_cnt)
+
+    if not line.strip():
+      # encounter an empty line (end of a document)
+      end_of_doc = True
+      cur_sent = []
+    else:
+      cur_sent = tokenizer.convert_text_to_ids(line.strip())
+
+      if FLAGS.add_double_eos:
+        cur_sent = [tokenizer.eos_id] + cur_sent + [tokenizer.eos_id]
+      elif FLAGS.add_eos:
+        cur_sent += [tokenizer.eos_id]
+
+    if cur_sent:
+      line_cnt += 1
+      doc.append(np.array(cur_sent))
+
+    # form a doc
+    if end_of_doc:
+      # only retain docs longer than `min_doc_len`
+      doc_len = sum(map(len, doc))
+      if doc_len >= max(FLAGS.min_doc_len, 1):
+        all_docs.append(doc)
+
+      # refresh working structs
+      doc, end_of_doc = [], False
+
+  # deal with the leafover if any
+  if doc:
+    # only retain docs longer than `min_doc_len`
+    doc_len = sum(map(len, doc))
+    if doc_len >= max(FLAGS.min_doc_len, 1):
+      all_docs.append(doc)
+
+  tf.logging.info("Finish %s with %d docs from %d lines.", file_path,
+                  len(all_docs), line_cnt)
+
+  return all_docs
+

@@ -16,11 +16,11 @@ import tensorflow as tf
 # pylint: disable=g-import-not-at-top
 try:
   from google3.experimental.users.zihangd.pretrain.data_utils import type_cast
-  from google3.experimental.users.zihangd.pretrain.data_utils import seq2seq_filename
+  from google3.experimental.users.zihangd.pretrain.data_utils import format_filename
   from google3.experimental.users.zihangd.pretrain.generator_utils import pack_dataset
 except ImportError as e:
   from data_utils import type_cast
-  from data_utils import seq2seq_filename
+  from data_utils import format_filename
   from generator_utils import pack_dataset
 # pylint: enable=g-import-not-at-top
 
@@ -144,12 +144,12 @@ def get_dataset(params,
                 is_training,
                 max_length,
                 min_length=1,
+                use_bfloat16=False,
                 preprocess=True,
                 num_threads=64,
                 prefetch_size=None,
-                record_shuffle_size=2048,
+                record_shuffle_size=10240,
                 batch_shuffle_size=512,
-                use_bfloat16=False,
                 max_records=-1):
   """Build a Dataset for this problem."""
   #### Split data files across hosts
@@ -176,11 +176,19 @@ def get_dataset(params,
     return dataset
 
   dataset = tf.data.Dataset.from_tensor_slices(tf.constant(data_files))
+  ## Shuffle files only for training examples.
+  if is_training:
+    tf.logging.info("File level shuffle with size: %d", len(data_files))
+    dataset = dataset.shuffle(len(data_files))
+
   # Create data-set from files by parsing, pre-processing and interleaving.
   if is_training:
+    cycle_length = min(8, len(data_files))
     dataset = dataset.apply(
         tf.data.experimental.parallel_interleave(
-            _load_records_and_preprocess, sloppy=True, cycle_length=8))
+            _load_records_and_preprocess,
+            sloppy=True,
+            cycle_length=cycle_length))
   else:
     dataset = _load_records_and_preprocess(dataset)
 
@@ -188,6 +196,7 @@ def get_dataset(params,
 
   ## Shuffle records only for training examples.
   if is_training:
+    tf.logging.info("Record level shuffle with size: %d", record_shuffle_size)
     dataset = dataset.shuffle(record_shuffle_size)
 
   ##### IMPORTANT #####
@@ -220,6 +229,7 @@ def get_dataset(params,
       batch_size, padded_shapes, drop_remainder=True)
 
   if is_training:
+    tf.logging.info("Batch level shuffle with size: %d", batch_shuffle_size)
     dataset = dataset.shuffle(batch_shuffle_size)
 
   return dataset
@@ -231,12 +241,12 @@ def get_input_fn(
     max_length,
     num_hosts=1,
     uncased=False,
-    num_threads=64,
-    use_bfloat16=False):
+    use_bfloat16=False,
+    **kwargs):
   """Create Estimator input function."""
 
   # Merge all record infos into a single one
-  record_glob_base = seq2seq_filename(
+  record_glob_base = format_filename(
       prefix="meta.{}".format(split),
       suffix="json*",
       uncased=uncased)
@@ -289,8 +299,8 @@ def get_input_fn(
       num_hosts=num_hosts,
       is_training=split == "train",
       max_length=max_length,
-      num_threads=num_threads,
-      use_bfloat16=use_bfloat16)
+      use_bfloat16=use_bfloat16,
+      **kwargs)
 
   def input_fn(params):
     """Input function wrapper."""

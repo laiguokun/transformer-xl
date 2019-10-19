@@ -12,12 +12,12 @@ import absl.logging as _logging  # pylint: disable=unused-import
 # pylint: disable=g-import-not-at-top
 try:
   import tensorflow.google as tf
-  from google3.experimental.users.zihangd.pretrain.data_utils import seq2seq_filename
+  from google3.experimental.users.zihangd.pretrain.data_utils import format_filename
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
   import google3.learning.deepmind.xmanager2.client.google as xm  # pylint: disable=unused-import
 except ImportError as e:
   import tensorflow as tf
-  from data_utils import seq2seq_filename
+  from data_utils import format_filename
   from tokenization import get_tokenizer
 # pylint: enable=g-import-not-at-top
 
@@ -30,10 +30,8 @@ flags.DEFINE_string("input_glob", "data/example/*.txt",
                     help="Input file glob.")
 flags.DEFINE_string("save_dir", "proc_data/example",
                     help="Directory for saving the processed data.")
-flags.DEFINE_enum("split", "train", ["train", "dev", "test"],
+flags.DEFINE_enum("split", "train", ["train", "valid", "test"],
                   help="Save the data as which split.")
-flags.DEFINE_integer("type_id", default=0,
-                     help="Language type id.")
 
 flags.DEFINE_integer("pass_id", 0, help="ID of the current pass."
                      "Different passes sample different negative segment.")
@@ -59,7 +57,7 @@ def _tfrecord_path(save_dir):
   """Get tfrecord path."""
   data_prefix = "data.{}".format(FLAGS.split)
   data_suffix = "tfrecord-{:05d}-of-{:05d}".format(FLAGS.task, FLAGS.num_task)
-  tfrecord_name = seq2seq_filename(
+  tfrecord_name = format_filename(
       prefix=data_prefix,
       suffix=data_suffix,
       uncased=FLAGS.uncased,
@@ -73,7 +71,7 @@ def _meta_path(save_dir):
   """Get meta path."""
   meta_prefix = "meta.{}".format(FLAGS.split)
   meta_suffix = "json-{:05d}-of-{:05d}".format(FLAGS.task, FLAGS.num_task)
-  meta_name = seq2seq_filename(
+  meta_name = format_filename(
       prefix=meta_prefix,
       suffix=meta_suffix,
       uncased=FLAGS.uncased,
@@ -150,10 +148,6 @@ def main(_):
   # Make workdirs
   if not tf.io.gfile.exists(FLAGS.save_dir):
     tf.io.gfile.makedirs(FLAGS.save_dir)
-
-  tfrecord_dir = os.path.join(FLAGS.save_dir, "tfrecords")
-  if not tf.io.gfile.exists(tfrecord_dir):
-    tf.io.gfile.makedirs(tfrecord_dir)
 
   # Interleavely split the work into FLAGS.num_task splits
   file_paths = sorted(tf.io.gfile.glob(FLAGS.input_glob))
