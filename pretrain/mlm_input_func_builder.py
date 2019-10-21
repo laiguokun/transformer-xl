@@ -33,6 +33,11 @@ flags.DEFINE_integer("min_tok", default=1,
                      help="Minimum number of tokens to sample in a span."
                      "Effective when token_span strategy is used.")
 
+flags.DEFINE_bool("add_eos", False,
+                  help="whether to append EOS at the end of a line.")
+flags.DEFINE_bool("add_double_eos", False,
+                  help="whether to append EOS at the begin and end of a line.")
+
 
 def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
   """Turn beg and end indices into actual mask."""
@@ -212,7 +217,21 @@ def mlm_process(dataset, seq_len, num_predict, use_bfloat16):
   """Turn a dataset of doc tfrecords into a dataset of chunked seqeuences."""
   # Flatten the original dataset into a continuous stream and then chunk the
   # continuous stream into segments of fixed length `seq_len`
-  dataset = dataset.unbatch().repeat().batch(seq_len)
+  if FLAGS.add_double_eos:
+    token_len = seq_len - 2
+    dataset = dataset.unbatch().repeat().batch(token_len)
+    def add_double_eos(example):
+      """Add <eos> in the begin and end of the sequence."""
+      inputs, type_id = example["inputs"], example["type_id"]
+      eos_tensor = tf.constant(FLAGS.eos_id, shape=[1], dtype=inputs.dtype)
+      example["inputs"] = tf.concat([eos_tensor, inputs, eos_tensor], 0)
+      example["type_id"] = tf.concat([type_id[:1], type_id, type_id[-1:]], 0)
+
+      return example
+
+    dataset = dataset.map(add_double_eos)
+  else:
+    dataset = dataset.unbatch().repeat().batch(seq_len)
 
   # Set fixed shape
   def set_shape(example):
@@ -233,7 +252,7 @@ def mlm_process(dataset, seq_len, num_predict, use_bfloat16):
   return dataset
 
 
-def get_record_parser(offline_pos):
+def get_record_parser():
   """Config tfrecord parser."""
   def parser(record):
     """function used to parse tfrecord."""
@@ -242,9 +261,6 @@ def get_record_parser(offline_pos):
         "inputs": tf.VarLenFeature(tf.int64),
         "type_id": tf.FixedLenFeature([1], tf.int64),
     }
-
-    if offline_pos:
-      record_spec["pos_seq"] = tf.VarLenFeature(tf.int64)
 
     # retrieve serialized example
     example = tf.parse_single_example(
@@ -256,10 +272,6 @@ def get_record_parser(offline_pos):
 
     # expand type id to full length
     example["type_id"] = tf.broadcast_to(example["type_id"], [inp_len])
-
-    if not offline_pos:
-      # generate position sequence online
-      example["pos_seq"] = tf.range(inp_len)
 
     # convert all sparse example to dense
     example = sparse_to_dense(example)
@@ -336,7 +348,7 @@ def sent_mlm_dataset(params,
   ##### Parse records
   dataset = tf.data.Dataset.from_tensor_slices(file_paths)
   dataset = parse_record(dataset=dataset,
-                         parser=get_record_parser(offline_pos=False),
+                         parser=get_record_parser(),
                          is_training=is_training,
                          num_threads=num_threads,
                          file_shuffle_size=len(file_paths),
@@ -402,7 +414,7 @@ def semidoc_mlm_dataset(params,
   ##### Parse records
   dataset = tf.data.Dataset.from_tensor_slices(file_paths)
   dataset = parse_record(dataset=dataset,
-                         parser=get_record_parser(offline_pos=True),
+                         parser=get_record_parser(),
                          is_training=is_training,
                          num_threads=num_threads,
                          file_shuffle_size=len(file_paths),
@@ -464,7 +476,7 @@ def doc_mlm_dataset(params,
     file_shuffle_size = (len(file_paths) + bsz_per_core - 1) // bsz_per_core
     parse_shard = functools.partial(
         parse_record,
-        parser=get_record_parser(offline_pos=True),
+        parser=get_record_parser(),
         is_training=is_training,
         num_threads=num_threads,
         file_shuffle_size=file_shuffle_size,
@@ -475,7 +487,7 @@ def doc_mlm_dataset(params,
 
     # Parse records
     dataset = parse_record(dataset,
-                           parser=get_record_parser(offline_pos=True),
+                           parser=get_record_parser(),
                            is_training=is_training,
                            num_threads=num_threads,
                            file_shuffle_size=len(file_names),

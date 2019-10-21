@@ -107,8 +107,8 @@ flags.DEFINE_string("eval_ckpt_path", default=None,
                     "If unset, will use the latest ckpt in `model_dir`.")
 flags.DEFINE_integer("eval_batch_size", default=60,
                      help="Size of evalation batch.")
-flags.DEFINE_integer("max_eval_batch", default=-1,
-                     help="Set -1 to turn off. Only used in test mode.")
+flags.DEFINE_integer("eval_steps", default=None,
+                     help="Number of evaluation steps to run.")
 flags.DEFINE_integer("start_eval_steps", default=200000,
                      help="Which checkpoint to start with in `do_eval_only` "
                      "mode.")
@@ -341,7 +341,7 @@ def main(unused_argv):
     assert FLAGS.num_hosts == 1
     # Get eval input function
     eval_input_fn = get_input_fn(FLAGS.eval_split)
-    tf.logging.info("num of eval batches %d", FLAGS.num_eval_batch)
+    tf.logging.info("num of eval batches %d", FLAGS.eval_steps)
 
     # Get eval cache function
     eval_cache_fn = get_cache_fn(FLAGS.mem_len)
@@ -404,7 +404,7 @@ def main(unused_argv):
         FLAGS.eval_ckpt_path = tf.train.latest_checkpoint(ckpt_dir)
 
       ret = estimator.evaluate(input_fn=eval_input_fn,
-                               steps=FLAGS.num_eval_batch,
+                               steps=FLAGS.eval_steps,
                                checkpoint_path=FLAGS.eval_ckpt_path)
       tf.logging.info("=" * 200)
       log_str = "Eval results | "
@@ -424,7 +424,7 @@ def main(unused_argv):
           continue
         tf.logging.info("Evaluate ckpt %d", global_step)
         ret = estimator.evaluate(input_fn=eval_input_fn,
-                                 steps=FLAGS.num_eval_batch,
+                                 steps=FLAGS.eval_steps,
                                  checkpoint_path=eval_checkpoint)
         eval_results.append(ret)
 

@@ -78,11 +78,15 @@ def main(unused_argv):
           for i in range(v.shape[0]):
             if k in ["masked_input"]:
               print(tokenizer.convert_ids_to_text(v[i].tolist()))
+            elif k in ["type_id"]:
+              print(" ".join([str(j) for j in v[i].tolist()]))
             # else:
             #   print(v[i].tolist())
         else:
           if k in ["masked_input"]:
             print(tokenizer.convert_ids_to_text(v.tolist()))
+          elif k in ["type_id"]:
+            print(" ".join([str(j) for j in v.tolist()]))
           # else:
           #   print(v.tolist())
 

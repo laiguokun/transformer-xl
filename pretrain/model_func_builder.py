@@ -145,7 +145,7 @@ def mlm_loss(features, labels, mems, n_token, is_training):
   #### Unpack input
   masked_inp = features["masked_input"]
   type_id = features["type_id"]
-  pos_seq = features["pos_seq"]
+  # pos_seq = features["pos_seq"]
 
   target_mapping = features["target_mapping"]
   target_mask = features["target_mask"]
@@ -160,7 +160,7 @@ def mlm_loss(features, labels, mems, n_token, is_training):
                              initializer,
                              is_training)
     masked_embed, word_embed_table = inp_func(
-        inputs=masked_inp, type_id=type_id, pos_seq=pos_seq,
+        inputs=masked_inp, type_id=type_id,  # pos_seq=pos_seq,
         return_embed_table=True)
 
     tfm_func = _get_tfm_func(initializer,
@@ -230,6 +230,61 @@ def extract_hiddens(inputs, type_id, n_token, is_training):
         return_all_hidden=True)
 
     return hiddens
+
+
+@bf16_decorator
+def get_lm_loss(features, mems, n_token, is_training):
+  """LM loss."""
+  del mems
+
+  initializer = _get_initializer()
+
+  #### Unpack input
+  inputs = features["inputs"]
+  target = features["target"]
+  type_id = features["type_id"]
+  # pos_seq = features["pos_seq"]
+
+  monitor_dict = {}
+
+  #### Transformer Model
+  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
+    inp_func = _get_inp_func(n_token,
+                             FLAGS.d_model,
+                             initializer,
+                             is_training)
+    input_embed, word_embed_table = inp_func(
+        inputs=inputs, type_id=type_id,  # pos_seq=pos_seq,
+        return_embed_table=True)
+
+    tfm_func = _get_tfm_func(initializer,
+                             is_training,
+                             phase="pretrain")
+    output, _ = tfm_func(
+        inputs=input_embed,
+        input_mask=None,
+        perm_mask=None,
+        causal=True)
+
+    lm_loss, _ = model.lm_loss(
+        hidden=output,
+        target=target,
+        n_token=n_token,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        lookup_table=word_embed_table,
+        tie_weight=FLAGS.tie_weight,
+        return_logits=False,
+        use_tpu=FLAGS.use_tpu)
+
+    if lm_loss.dtype != tf.float32:
+      lm_loss = tf.cast(lm_loss, tf.float32)
+
+    total_loss = tf.reduce_mean(lm_loss)
+
+    monitor_dict["lm_loss"] = total_loss
+
+  return total_loss, {}, monitor_dict
 
 
 @bf16_decorator
@@ -357,57 +412,3 @@ def joint_loss(features, labels, n_token, is_training):
   }
 
   return total_loss, monitor_dict
-
-
-@bf16_decorator
-def get_lm_loss(features, mems, n_token, is_training):
-  """LM loss."""
-  del mems
-
-  initializer = _get_initializer()
-
-  #### Unpack input
-  inputs = features["inputs"]
-  target = features["target"]
-  type_id = features["type_id"]
-  pos_seq = features["pos_seq"]
-
-  monitor_dict = {}
-
-  #### Transformer Model
-  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
-    inp_func = _get_inp_func(n_token,
-                             FLAGS.d_model,
-                             initializer,
-                             is_training)
-    input_embed, word_embed_table = inp_func(
-        inputs=inputs, type_id=type_id, pos_seq=pos_seq,
-        return_embed_table=True)
-
-    tfm_func = _get_tfm_func(initializer,
-                             is_training,
-                             phase="pretrain")
-    output, _ = tfm_func(
-        inputs=input_embed,
-        input_mask=None,
-        perm_mask=None)
-
-    lm_loss, _ = model.lm_loss(
-        hidden=output,
-        target=target,
-        n_token=n_token,
-        d_model=FLAGS.d_model,
-        initializer=initializer,
-        lookup_table=word_embed_table,
-        tie_weight=FLAGS.tie_weight,
-        return_logits=False,
-        use_tpu=FLAGS.use_tpu)
-
-    if lm_loss.dtype != tf.float32:
-      lm_loss = tf.cast(lm_loss, tf.float32)
-
-    total_loss = tf.reduce_mean(lm_loss)
-
-    monitor_dict["lm_loss"] = total_loss
-
-  return total_loss, {}, monitor_dict

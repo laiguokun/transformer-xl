@@ -13,6 +13,7 @@ import tensorflow as tf
 try:
   from google3.experimental.users.zihangd.pretrain.common_ops import update_monitor_dict
   from google3.experimental.users.zihangd.pretrain.common_ops import sinusoid_positional_encoding
+  from google3.experimental.users.zihangd.pretrain.common_ops import causal_attn_mask
   from google3.experimental.users.zihangd.pretrain.common_ops import merge_attn_masks
   from google3.experimental.users.zihangd.pretrain.common_ops import embedding_lookup
   from google3.experimental.users.zihangd.pretrain.common_ops import get_activation
@@ -22,6 +23,7 @@ try:
 except ImportError:
   from common_ops import update_monitor_dict
   from common_ops import sinusoid_positional_encoding
+  from common_ops import causal_attn_mask
   from common_ops import merge_attn_masks
   from common_ops import embedding_lookup
   from common_ops import get_activation
@@ -223,7 +225,7 @@ def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
 def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
                 dropout, dropatt, dropact, initializer, is_training,
                 input_mask=None, perm_mask=None, ff_activation="gelu",
-                return_all_hidden=False, scope="transformer"):
+                causal=False, return_all_hidden=False, scope="transformer"):
   """Transformer model."""
 
   monitor_dict = {}
@@ -238,12 +240,18 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
   tf.logging.info("Hparam related:")
   tf.logging.info("  - initializer %s", initializer)
   tf.logging.info("  - ff_activation %s", ff_activation)
+  tf.logging.info("  - causal %s", causal)
   tf.logging.info("============================")
 
   hiddens = []
   with tf.variable_scope(scope):
     ##### Attention mask
-    attn_mask = merge_attn_masks(None, input_mask, perm_mask)
+    if causal:
+      causal_mask = causal_attn_mask(tf.shape(inputs)[1], dtype=inputs.dtype)
+      causal_mask = causal_mask[None, None]
+    else:
+      causal_mask = None
+    attn_mask = merge_attn_masks(causal_mask, input_mask, perm_mask)
 
     ##### Input projection
     if inputs.shape.as_list()[-1] != d_model:
