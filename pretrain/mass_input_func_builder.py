@@ -1,4 +1,4 @@
-"""Create MLM input function for TPUEstimator."""
+"""Create mass input function for TPUEstimator."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -16,27 +16,19 @@ import tensorflow as tf
 try:
   from google3.experimental.users.zihangd.pretrain.data_utils import type_cast
   from google3.experimental.users.zihangd.pretrain.data_utils import sparse_to_dense
+  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import chunk_to_sequence
+  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import create_target_mapping
+  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import discrepancy_correction
 except ImportError as e:
   from data_utils import type_cast
   from data_utils import sparse_to_dense
+  from mlm_input_func_builder import chunk_to_sequence
+  from mlm_input_func_builder import create_target_mapping
+  from mlm_input_func_builder import discrepancy_correction
 # pylint: enable=g-import-not-at-top
 
+
 FLAGS = flags.FLAGS
-flags.DEFINE_enum("sample_strategy", default="single_token",
-                  enum_values=["single_token", "token_span"],
-                  help="Stragey used to sample prediction targets.")
-
-flags.DEFINE_integer("max_tok", default=8,
-                     help="Maximum number of tokens to sample in a span."
-                     "Effective when token_span strategy is used.")
-flags.DEFINE_integer("min_tok", default=8,
-                     help="Minimum number of tokens to sample in a span."
-                     "Effective when token_span strategy is used.")
-
-flags.DEFINE_bool("add_eos", False,
-                  help="whether to append EOS at the end of a line.")
-flags.DEFINE_bool("add_double_eos", False,
-                  help="whether to append EOS at the begin and end of a line.")
 
 
 def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
@@ -58,13 +50,22 @@ def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
   target_mask = tf.reduce_sum(candidate_matrix * masked_matrix, axis=0)
   is_masked = tf.cast(target_mask, tf.bool)
 
-  return is_masked
+  segment_range = tf.cast(tf.range(1, tf.shape(candidate_matrix)[0] + 1),
+                          dtype=candidate_matrix.dtype)
+  segment_matrix = segment_range[:, None] * candidate_matrix
+  segment_ids = tf.reduce_sum(segment_matrix * masked_matrix, axis=0)
+  segment_ids = tf.cast(segment_ids, dtype=inputs.dtype)
+
+  pos_mat = tf.cumsum(candidate_matrix, axis=1)
+  pos_seq = tf.reduce_sum(pos_mat * masked_matrix, axis=0)
+
+  return is_masked, segment_ids, pos_seq
 
 
 def _token_span_mask(inputs, tgt_len, num_predict):
   """Sample token spans as prediction targets."""
   mask_alpha = tgt_len / num_predict
-  round_to_int = lambda x: tf.cast(tf.round(x), tf.int64)
+  round_to_int = lambda x: tf.cast(x, tf.int64)
 
   # Sample span lengths from a zipf distribution
   span_len_seq = np.arange(FLAGS.min_tok, FLAGS.max_tok + 1)
@@ -93,7 +94,7 @@ def _token_span_mask(inputs, tgt_len, num_predict):
   end_indices = beg_indices + span_lens
 
   # Remove out of range indices
-  valid_idx_mask = end_indices < tgt_len
+  valid_idx_mask = end_indices <= tgt_len
   beg_indices = tf.boolean_mask(beg_indices, valid_idx_mask)
   end_indices = tf.boolean_mask(end_indices, valid_idx_mask)
 
@@ -107,101 +108,35 @@ def _token_span_mask(inputs, tgt_len, num_predict):
                            num_predict)
 
 
-def _single_token_mask(inputs, tgt_len, num_predict):
-  """Sample individual tokens as prediction targets."""
-  all_indices = tf.range(tgt_len, dtype=tf.int64)
-  non_func_mask = tf.not_equal(inputs, FLAGS.eos_id)
-  non_func_indices = tf.boolean_mask(all_indices, non_func_mask)
-
-  masked_pos = tf.random_shuffle(non_func_indices)
-  masked_pos = tf.contrib.framework.sort(masked_pos[:num_predict])
-  target_mask = tf.sparse_to_dense(
-      sparse_indices=masked_pos,
-      output_shape=[tgt_len],
-      sparse_values=1.0,
-      default_value=0.0)
-
-  is_masked = tf.cast(target_mask, tf.bool)
-
-  return is_masked
-
-
-def online_sample_masks(inputs, tgt_len, num_predict):
-  """Sample target positions to predict."""
-  tf.logging.info("Online sample with strategy: `%s`.", FLAGS.sample_strategy)
-  if FLAGS.sample_strategy == "single_token":
-    return _single_token_mask(inputs, tgt_len, num_predict)
-  elif FLAGS.sample_strategy == "token_span":
-    return _token_span_mask(inputs, tgt_len, num_predict)
-  else:
-    raise NotImplementedError
-
-
-def discrepancy_correction(inputs, is_masked, tgt_len):
-  """Construct the masked input."""
-  # 80% MASK, 10% original, 10% random words
-  random_p = tf.random.uniform([tgt_len], maxval=1.0)
-  mask_array = tf.constant(FLAGS.mask_id, dtype=tf.int64, shape=[tgt_len])
-  mask_v = tf.where(random_p < 0.2, inputs, mask_array)
-  random_words = tf.random.uniform([tgt_len], maxval=FLAGS.vocab_size,
-                                   dtype=tf.int64)
-  mask_v = tf.where(random_p < 0.1, random_words, mask_v)
-
-  masked_ids = tf.where(is_masked, mask_v, inputs)
-
-  return masked_ids
-
-
-def create_target_mapping(example, is_masked, seq_len, num_predict,
-                          **kwargs):
-  """Create target mapping and retrieve the corresponding targets."""
-  indices = tf.range(seq_len, dtype=tf.int64)
-  indices = tf.boolean_mask(indices, is_masked)
-
-  ##### extra padding if needed
-  actual_num_predict = tf.shape(indices)[0]
-  pad_len = num_predict - actual_num_predict
-
-  ##### target_mapping
-  target_mapping = tf.one_hot(indices, seq_len, dtype=tf.float32)
-  paddings = tf.zeros([pad_len, seq_len], dtype=target_mapping.dtype)
-  target_mapping = tf.concat([target_mapping, paddings], axis=0)
-  example["target_mapping"] = tf.reshape(target_mapping,
-                                         [num_predict, seq_len])
-
-  ##### target mask
-  target_mask = tf.concat(
-      [tf.ones([actual_num_predict], dtype=tf.float32),
-       tf.zeros([pad_len], dtype=tf.float32)],
-      axis=0)
-  example["target_mask"] = tf.reshape(target_mask, [num_predict])
-
-  ##### others
-  for k, v in kwargs.items():
-    tf.logging.info("Retrieve %s.", k)
-    v = tf.boolean_mask(v, is_masked)
-    paddings = tf.zeros([pad_len], dtype=v.dtype)
-    v = tf.concat([v, paddings], axis=0)
-    example[k] = tf.reshape(v, [num_predict])
-
-
-def create_mlm_target(example, seq_len, num_predict, use_bfloat16):
+def create_mass_target(example, seq_len, num_predict, use_bfloat16):
   """docs."""
-  inputs = example.pop("inputs")
+  inputs = example["inputs"]
 
   # sample mask
-  is_masked = online_sample_masks(
+  is_masked, segment_ids, pos_seq = _token_span_mask(
       inputs, seq_len, num_predict)
   masked_input = discrepancy_correction(inputs, is_masked, seq_len)
 
-  # masked_input, original_input, input_mask
-  example["masked_input"] = tf.reshape(masked_input, [seq_len])
-  example["inp_mask"] = tf.cast(
-      tf.equal(example["masked_input"], FLAGS.mask_id), tf.float32)
+  # masked_input (encoder input)
+  example["enc_inp"] = tf.reshape(masked_input, [seq_len])
 
   # create target mapping
   create_target_mapping(example, is_masked, seq_len, num_predict,
-                        target=inputs)
+                        target=inputs, dec_seg=segment_ids, dec_pos=pos_seq,
+                        dec_type=example["type_id"])
+
+  # post processing
+  example["dec_type"] = 1 - example["dec_type"]
+  target = example["target"]
+  eos_tensor = tf.constant(FLAGS.eos_id, shape=[1], dtype=target.dtype)
+  dec_inp = tf.concat([eos_tensor, target[:-1]], 0)
+
+  seg_ids = example["dec_seg"]
+  eos_mask = tf.not_equal(tf.concat([seg_ids[:1], seg_ids[:-1]], 0), seg_ids)
+  dec_inp = tf.where(eos_mask,
+                     tf.broadcast_to(eos_tensor, [num_predict]),
+                     dec_inp)
+  example["dec_inp"] = dec_inp
 
   # type cast for example
   type_cast(example, use_bfloat16)
@@ -212,62 +147,17 @@ def create_mlm_target(example, seq_len, num_predict, use_bfloat16):
   return example
 
 
-def chunk_to_sequence(dataset, seq_len):
-  """Turn a dataset of doc tfrecords into a dataset of chunked seqeuences."""
-  # Flatten the original dataset into a continuous stream and then chunk the
-  # continuous stream into segments of fixed length `seq_len`
-  if FLAGS.add_double_eos:
-    token_len = seq_len - 2
-    dataset = dataset.unbatch().repeat().batch(token_len)
-    def add_double_eos(example):
-      """Add <eos> in the begin and end of the sequence."""
-      inputs, type_id = example["inputs"], example["type_id"]
-      eos_tensor = tf.constant(FLAGS.eos_id, shape=[1], dtype=inputs.dtype)
-      example["inputs"] = tf.concat([eos_tensor, inputs, eos_tensor], 0)
-      example["type_id"] = tf.concat([type_id[:1], type_id, type_id[-1:]], 0)
-
-      return example
-
-    dataset = dataset.map(add_double_eos)
-  elif FLAGS.add_eos:
-    token_len = seq_len - 1
-    dataset = dataset.unbatch().repeat().batch(token_len)
-    def add_eos(example):
-      """Add <eos> at the end of the sequence."""
-      inputs, type_id = example["inputs"], example["type_id"]
-      eos_tensor = tf.constant(FLAGS.eos_id, shape=[1], dtype=inputs.dtype)
-      example["inputs"] = tf.concat([inputs, eos_tensor], 0)
-      example["type_id"] = tf.concat([type_id, type_id[-1:]], 0)
-
-      return example
-
-    dataset = dataset.map(add_eos)
-  else:
-    dataset = dataset.unbatch().repeat().batch(seq_len)
-
-  # Set fixed shape
-  def set_shape(example):
-    """Give fixed shape to example for TPU."""
-    for k in example.keys():
-      example[k].set_shape((seq_len))
-    return example
-  dataset = dataset.map(set_shape)
-
-  return dataset
-
-
-def mlm_process(dataset, seq_len, num_predict, use_bfloat16):
-  """Process input tfrecords into proper format for MLM training."""
-  # Get input sequence
+def mass_process(dataset, seq_len, num_predict, use_bfloat16):
+  """Process input tfrecords into proper format for MASS training."""
   dataset = chunk_to_sequence(dataset, seq_len)
 
-  # Create MLM target
-  create_mlm_target_mapper = functools.partial(
-      create_mlm_target,
+  # Create mass target
+  create_mass_target_mapper = functools.partial(
+      create_mass_target,
       seq_len=seq_len,
       num_predict=num_predict,
       use_bfloat16=use_bfloat16)
-  dataset = dataset.map(create_mlm_target_mapper, num_parallel_calls=64)
+  dataset = dataset.map(create_mass_target_mapper, num_parallel_calls=64)
 
   return dataset
 
@@ -340,18 +230,18 @@ def parse_record(dataset,
   return dataset
 
 
-def sent_mlm_dataset(params,
-                     file_names,
-                     num_hosts,
-                     num_core_per_host,
-                     seq_len,
-                     num_predict,
-                     is_training,
-                     use_bfloat16=False,
-                     num_threads=64,
-                     record_shuffle_size=4096,
-                     sequence_shuffle_size=2048):
-  """Get sentence level MLM dataset."""
+def sent_mass_dataset(params,
+                      file_names,
+                      num_hosts,
+                      num_core_per_host,
+                      seq_len,
+                      num_predict,
+                      is_training,
+                      use_bfloat16=False,
+                      num_threads=64,
+                      record_shuffle_size=4096,
+                      sequence_shuffle_size=2048):
+  """Get sentence level mass dataset."""
   bsz_per_core = params["batch_size"]
   if num_hosts > 1:
     host_id = params["context"].current_host
@@ -375,7 +265,7 @@ def sent_mlm_dataset(params,
                          record_shuffle_size=record_shuffle_size)
 
   # process dataset
-  dataset = mlm_process(dataset, seq_len, num_predict, use_bfloat16)
+  dataset = mass_process(dataset, seq_len, num_predict, use_bfloat16)
 
   # Sequence level shuffle
   if is_training and sequence_shuffle_size:
@@ -392,25 +282,25 @@ def sent_mlm_dataset(params,
   return dataset
 
 
-def semidoc_mlm_dataset(params,
-                        file_names,
-                        num_hosts,
-                        num_core_per_host,
-                        seq_len,
-                        num_predict,
-                        is_training,
-                        use_bfloat16=False,
-                        num_threads=64,
-                        record_shuffle_size=256,
-                        sequence_shuffle_size=2048):
+def semidoc_mass_dataset(params,
+                         file_names,
+                         num_hosts,
+                         num_core_per_host,
+                         seq_len,
+                         num_predict,
+                         is_training,
+                         use_bfloat16=False,
+                         num_threads=64,
+                         record_shuffle_size=256,
+                         sequence_shuffle_size=2048):
   # pylint: disable=g-doc-args
-  """Get semi-doc level MLM dataset.
+  """Get semi-doc level mass dataset.
 
   Notes:
   - Each sequence comes from the same document (except for boundary cases).
-    This is different from the standard sent-level MLM dataset.
+    This is different from the standard sent-level mass dataset.
   - No consecutivity is ensured across batches, which is different from the
-    standard doc-level MLM dataset.
+    standard doc-level mass dataset.
   - Effectively, semi-doc dataset maintains short range (seq_len) dependency,
     which is more random than doc-level and less random than sent-level.
 
@@ -441,7 +331,7 @@ def semidoc_mlm_dataset(params,
                          record_shuffle_size=record_shuffle_size)
 
   # process dataset
-  dataset = mlm_process(dataset, seq_len, num_predict, use_bfloat16)
+  dataset = mass_process(dataset, seq_len, num_predict, use_bfloat16)
 
   # Sequence level shuffle
   if is_training and sequence_shuffle_size:
@@ -458,17 +348,17 @@ def semidoc_mlm_dataset(params,
   return dataset
 
 
-def doc_mlm_dataset(params,
-                    file_names,
-                    num_hosts,
-                    num_core_per_host,
-                    seq_len,
-                    num_predict,
-                    is_training,
-                    use_bfloat16=False,
-                    num_threads=64,
-                    record_shuffle_size=256):
-  """Get document level MLM dataset."""
+def doc_mass_dataset(params,
+                     file_names,
+                     num_hosts,
+                     num_core_per_host,
+                     seq_len,
+                     num_predict,
+                     is_training,
+                     use_bfloat16=False,
+                     num_threads=64,
+                     record_shuffle_size=256):
+  """Get document level mass dataset."""
 
   bsz_per_core = params["batch_size"]
   if num_hosts > 1:
@@ -517,7 +407,7 @@ def doc_mlm_dataset(params,
     shards = [dataset.shard(bsz_per_core, i) for i in range(bsz_per_core)]
 
   # process each shard
-  process_shard = functools.partial(mlm_process,
+  process_shard = functools.partial(mass_process,
                                     seq_len=seq_len,
                                     num_predict=num_predict,
                                     use_bfloat16=use_bfloat16)
@@ -583,7 +473,7 @@ def get_input_fn(
   sent_files = dir_to_paths(sent_dir, "sent")
 
   file_list = [doc_files, semi_files, sent_files]
-  func_list = [doc_mlm_dataset, semidoc_mlm_dataset, sent_mlm_dataset]
+  func_list = [doc_mass_dataset, semidoc_mass_dataset, sent_mass_dataset]
 
   def input_fn(params):
     """Construct input function for TPUEstimator."""
