@@ -39,6 +39,7 @@ def main(argv):
   rep_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
   rep_mask = tf.logical_and(
       rep_rand < (rep_ratio / (1 - del_ratio)), non_del_mask)
+  rep_mask = tf.logical_and(rep_mask, tf.logical_not(add_mask))
 
   shift_val = tf.cast(add_mask, tf.int32) - tf.cast(del_mask, tf.int32)
   shift_val = tf.cumsum(shift_val)
@@ -65,12 +66,12 @@ def main(argv):
       indices=tgt_idx[:, None],
       updates=tgt_val)
   print(output.numpy().tolist())
-  print(tf.cast(rep_mask, tf.int32).numpy().tolist())
   output = tf.tensor_scatter_nd_update(
       output,
       indices=add_idx[:, None],
       updates=add_val)
   print(output.numpy().tolist())
+  print(tf.cast(rep_mask, tf.int32).numpy().tolist())
   print(tf.cast(add_mask, tf.int32).numpy().tolist())
   print(tf.cast(del_mask, tf.int32).numpy().tolist())
 
