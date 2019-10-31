@@ -7,7 +7,7 @@ from absl import app
 import tensorflow as tf
 tf.enable_eager_execution()
 
-
+'''
 def get_type_id(tgt_len, tgt_idx, type_val):
   tgt_idx_left_shift = tgt_idx[:-1]
   type_val_right_shift = type_val[1:]
@@ -27,6 +27,25 @@ def get_type_id(tgt_len, tgt_idx, type_val):
   new_type_id_shift = tf.math.cumsum(new_type_id_shift)
   new_type_id = new_type_id - new_type_id_shift
   new_type_id = tf.reverse(new_type_id, axis=[0])
+  return new_type_id
+'''
+def get_type_id(tgt_len, tgt_idx, type_val):
+  tgt_idx_left_shift = tgt_idx[:-1]
+  type_val_right_shift = type_val[1:]
+  new_type_id_shift = tf.scatter_nd(
+    shape=[tgt_len],
+    indices=tgt_idx_left_shift[:, None],
+    updates=type_val_right_shift
+  )
+  new_type_id_shift = tf.concat([type_val[:1], new_type_id_shift], axis=0)
+  new_type_id_shift = tf.math.cumsum(new_type_id_shift, exclusive=True)[1:]
+  new_type_id = tf.scatter_nd(
+    shape=[tgt_len],
+    indices=tgt_idx[:, None],
+    updates=type_val
+  )
+  new_type_id = tf.math.cumsum(new_type_id, exclusive=True)
+  new_type_id = new_type_id_shift - new_type_id
   return new_type_id
 
 def main(argv):
