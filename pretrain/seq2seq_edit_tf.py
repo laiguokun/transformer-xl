@@ -10,7 +10,7 @@ tf.enable_eager_execution()
 
 def main(argv):
   if len(argv) > 1:
-    raise app.UsageError('Too many command-line arguments.')
+    raise app.UsageError("Too many command-line arguments.")
 
   seq_len = 16
   inputs = tf.range(1, seq_len + 1, 1, dtype=tf.int32)
@@ -37,9 +37,9 @@ def main(argv):
   print(add_mask)
 
   rep_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
+  rep_mask = tf.logical_and(tf.logical_not(add_mask), non_del_mask)
   rep_mask = tf.logical_and(
-      rep_rand < (rep_ratio / (1 - del_ratio)), non_del_mask)
-  rep_mask = tf.logical_and(rep_mask, tf.logical_not(add_mask))
+      rep_rand < (rep_ratio / (1 - del_ratio - add_ratio)), rep_mask)
 
   shift_val = tf.cast(add_mask, tf.int32) - tf.cast(del_mask, tf.int32)
   shift_val = tf.cumsum(shift_val)
@@ -71,10 +71,10 @@ def main(argv):
       indices=add_idx[:, None],
       updates=add_val)
   print(output.numpy().tolist())
-  print(tf.cast(rep_mask, tf.int32).numpy().tolist())
-  print(tf.cast(add_mask, tf.int32).numpy().tolist())
-  print(tf.cast(del_mask, tf.int32).numpy().tolist())
+  print("rep", tf.cast(rep_mask, tf.int32).numpy().tolist())
+  print("add", tf.cast(add_mask, tf.int32).numpy().tolist())
+  print("del", tf.cast(del_mask, tf.int32).numpy().tolist())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   app.run(main)
