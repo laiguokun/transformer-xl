@@ -10,7 +10,7 @@ tf.enable_eager_execution()
 
 def main(argv):
   if len(argv) > 1:
-    raise app.UsageError('Too many command-line arguments.')
+    raise app.UsageError("Too many command-line arguments.")
 
   seq_len = 16
   inputs = tf.range(1, seq_len + 1, 1, dtype=tf.int32)
@@ -48,6 +48,7 @@ def main(argv):
       rep_mask,
       tf.constant(-1, shape=[seq_len]),
       inputs)
+
 
   tgt_len_encoder = tgt_len_decoder = seq_len
   print("rep", tf.cast(rep_mask, tf.int32).numpy().tolist())
@@ -124,5 +125,5 @@ def main(argv):
   print("del decoder", tf.cast(del_mask_decoder, tf.int32).numpy().tolist())
   
 
-if __name__ == '__main__':
+if __name__ == "__main__":
   app.run(main)
