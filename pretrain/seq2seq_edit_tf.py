@@ -17,7 +17,11 @@ def main(argv):
 
   del_ratio = 0.1
   add_ratio = 0.1
-  rep_ratio = 0.1
+  rep_ratio = 0.2
+
+  rep_label = -1
+  add_label = -2
+  del_label = -3
 
   del_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
   del_mask = del_rand < del_ratio
@@ -25,65 +29,61 @@ def main(argv):
 
   right_shift_del_mask = tf.concat(
       [tf.constant(False, shape=[1]), del_mask[:-1]], axis=0)
-  non_add_mask = tf.logical_or(
-      del_mask, right_shift_del_mask)
-  
+  non_add_mask = tf.logical_or(del_mask, right_shift_del_mask)
+
   add_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
-  add_num = tf.math.reduce_sum(tf.cast(add_rand < add_ratio, tf.int32)).numpy()
-  non_add_logit = tf.math.log(tf.cast(tf.logical_not(non_add_mask), tf.float32))
-  add_idx = tf.random.categorical(tf.expand_dims(non_add_logit, 0), add_num)
-  add_idx = tf.squeeze(add_idx, 0)
-  add_mask = tf.scatter_nd(
-      shape=[seq_len],
-      indices=add_idx[:, None],
-      updates=tf.constant(1, shape=[add_num])
-  )
-  add_mask_bool = add_mask > 0
-  
+  add_num = tf.reduce_sum(tf.cast(add_rand < add_ratio, tf.int32))
+  add_uniform = tf.random.uniform(shape=[add_num, seq_len], minval=0, maxval=1)
+  add_uniform -= 1e5 * tf.cast(non_add_mask, tf.float32)
+  add_idx = tf.argmax(add_uniform, axis=1)
+  add_cnt = tf.reduce_sum(tf.one_hot(add_idx, seq_len, dtype=tf.int32), 0)
+
   rep_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
-  rep_mask = tf.logical_and(tf.logical_not(add_mask_bool), tf.logical_not(non_add_mask))
+  rep_mask = tf.logical_and(tf.equal(add_cnt, 0), tf.logical_not(non_add_mask))
   rep_mask = tf.logical_and(
       rep_rand < (rep_ratio / (1 - 2 * del_ratio - add_ratio)), rep_mask)
   rep_input = tf.where(
       rep_mask,
-      tf.constant(-1, shape=[seq_len]),
+      tf.constant(rep_label, shape=[seq_len]),
       inputs)
-
 
   tgt_len_encoder = tgt_len_decoder = seq_len
   print("rep", tf.cast(rep_mask, tf.int32).numpy().tolist())
-  print("add", tf.cast(add_mask, tf.int32).numpy().tolist())
+  print("add", add_cnt.numpy().tolist())
   print("del", tf.cast(del_mask, tf.int32).numpy().tolist())
-  #### encoder input
-  shift_val = add_mask - tf.cast(del_mask, tf.int32)
-  shift_val = tf.cumsum(shift_val)
 
   ori_idx = tf.range(seq_len)
+
+  #### encoder input
+  shift_val = add_cnt - tf.cast(del_mask, tf.int32)
+  shift_val = tf.cumsum(shift_val)
+
   shift_idx = ori_idx + shift_val
 
   tgt_len = tgt_len_encoder
   valid_tgt = shift_idx < tgt_len
-  #### remove deleted token
+
+  # remove deleted token
   tgt_idx = tf.boolean_mask(shift_idx, tf.logical_and(non_del_mask, valid_tgt))
   tgt_val = tf.boolean_mask(rep_input, tf.logical_and(non_del_mask, valid_tgt))
-  
-  max_len = tf.math.reduce_max(tgt_idx).numpy() + 1
 
-  output_encoder = tf.scatter_nd(
+  max_len = tf.math.reduce_max(tgt_idx) + 1
+
+  enc_seq = tf.scatter_nd(
       shape=[tgt_len],
       indices=tf.range(0, max_len)[:, None],
-      updates=tf.constant(-2, shape=[max_len])
+      updates=tf.zeros(shape=[max_len], dtype=tf.int32) + add_label
   )
-  output_encoder = tf.tensor_scatter_nd_update(
-      output_encoder,
+  enc_seq = tf.tensor_scatter_nd_update(
+      enc_seq,
       indices=tgt_idx[:, None],
       updates=tgt_val)
 
   print("encoder input")
-  print(output_encoder.numpy().tolist())
-  #decoder output
-  shift_val = tf.cumsum(add_mask)
-  ori_idx = tf.range(seq_len)
+  print(enc_seq.numpy().tolist())
+
+  #### decoder
+  shift_val = tf.cumsum(add_cnt)
   shift_idx = ori_idx + shift_val
 
   tgt_len = tgt_len_decoder
@@ -91,39 +91,45 @@ def main(argv):
 
   tgt_idx = tf.boolean_mask(shift_idx, valid_tgt)
   tgt_val = tf.boolean_mask(inputs, valid_tgt)
-  del_val = tf.boolean_mask(del_mask, valid_tgt)
-  rep_val = tf.boolean_mask(rep_mask, valid_tgt)
 
-  max_len = tf.math.reduce_max(tgt_idx).numpy() + 1
+  max_len = tf.math.reduce_max(tgt_idx) + 1
 
-  output_decoder = tf.scatter_nd(
-      shape=[tgt_len],
-      indices=tf.range(0, max_len)[:, None],
-      updates=tf.constant(-2, shape=[max_len])
-  )
-  output_decoder = tf.tensor_scatter_nd_update(
-      output_decoder,
+  pad_id = 100
+  eos_id = 101
+  add_id = 102
+
+  dec_seq = tf.concat(
+      [tf.zeros(shape=[max_len], dtype=tf.int32) + add_id,
+       tf.zeros(shape=[tgt_len - max_len], dtype=tf.int32) + pad_id], 0)
+  dec_seq = tf.tensor_scatter_nd_update(
+      dec_seq,
       indices=tgt_idx[:, None],
       updates=tgt_val)
 
-  add_mask_decoder = tf.math.equal(output_decoder, tf.constant(-2, shape=[tgt_len]))
-  rep_mask_decoder = tf.scatter_nd(
-      shape=[tgt_len],
-      indices=tgt_idx[:, None],
-      updates=rep_val
-  )
-  del_mask_decoder = tf.scatter_nd(
-      shape=[tgt_len],
-      indices=tgt_idx[:, None],
-      updates=del_val
-  )
+  # decoder input
+  dec_inp = tf.concat([tf.constant(eos_id, shape=[1]), dec_seq[:-1]], 0)
 
-  print("decoder output")
-  print(output_decoder.numpy().tolist())
-  print("rep decoder", tf.cast(rep_mask_decoder, tf.int32).numpy().tolist())
-  print("add decoder", tf.cast(add_mask_decoder, tf.int32).numpy().tolist())
-  print("del decoder", tf.cast(del_mask_decoder, tf.int32).numpy().tolist())
-  
+  # edit type label
+  dec_add_mask = tf.equal(dec_seq, add_id)
+  dec_rep_mask = tf.scatter_nd(
+      shape=[tgt_len],
+      indices=tgt_idx[:, None],
+      updates=tf.boolean_mask(rep_mask, valid_tgt)
+  )
+  dec_del_mask = tf.scatter_nd(
+      shape=[tgt_len],
+      indices=tgt_idx[:, None],
+      updates=tf.boolean_mask(del_mask, valid_tgt)
+  )
+  edit_label = tf.cast(dec_add_mask, tf.int32) * add_label
+  edit_label += tf.cast(dec_rep_mask, tf.int32) * rep_label
+  edit_label += tf.cast(dec_del_mask, tf.int32) * del_label
+
+  print("decoder")
+  print("inputs", dec_inp.numpy().tolist())
+  print("target", dec_seq.numpy().tolist())
+  print("labels", edit_label.numpy().tolist())
+
 
 if __name__ == "__main__":
   app.run(main)
