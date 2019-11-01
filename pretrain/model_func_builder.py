@@ -448,18 +448,17 @@ def dae_loss(features, labels, mems, n_token, is_training):
   dec_type = features["dec_type"]
   edit_label = features["edit_label"]
 
-  #### Shared input embedding
-  with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
-    enc_inp_func = _get_inp_func(n_token,
-                                 FLAGS.d_model,
-                                 initializer,
-                                 is_training)
-    gen_embed, shared_embed_table = enc_inp_func(
+  #### Shared input embedding (for generator)
+  with tf.variable_scope("input", reuse=tf.AUTO_REUSE):
+    inp_func = _get_inp_func(n_token,
+                             FLAGS.d_model,
+                             initializer,
+                             is_training)
+    gen_embed, shared_embed_table = inp_func(
         inputs=gen_inp, type_id=None, return_embed_table=True)
 
-  #### Generator
+  #### Generator TFM
   with tf.variable_scope("generator", reuse=tf.AUTO_REUSE):
-    #### Transformer layer
     gen_func = _get_tfm_func(initializer,
                              is_training,
                              "pretrain",
@@ -504,30 +503,26 @@ def dae_loss(features, labels, mems, n_token, is_training):
   samples = tf.cast(samples, tf.int32)
   enc_inp = tf.where(tf.equal(gen_inp, FLAGS.mask_id), samples, gen_inp)
 
-  #### Shared input embedding
-  with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
-    #### Input layer
-    enc_embed = enc_inp_func(inputs=enc_inp, type_id=enc_type)
+  #### Shared input embedding (for encoder)
+  with tf.variable_scope("input", reuse=tf.AUTO_REUSE):
+    enc_embed = inp_func(inputs=enc_inp, type_id=enc_type)
 
-    #### Transformer layer
+  #### Encoder TFM
+  with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
     tfm_func = _get_tfm_func(initializer, is_training, "pretrain")
     enc_output, _ = tfm_func(
         inputs=enc_embed,
         input_mask=enc_mask,
         perm_mask=None)
 
-  #### Discriminator
-  with tf.variable_scope("decoder", reuse=tf.AUTO_REUSE):
-    #### Input layer
-    dec_inp_func = _get_inp_func(n_token,
-                                 FLAGS.d_model,
-                                 initializer,
-                                 is_training)
-    dec_embed = dec_inp_func(inputs=dec_inp, type_id=dec_type,
-                             word_embed_table=shared_embed_table)
+  #### Shared input embedding (for decoder)
+  with tf.variable_scope("input", reuse=tf.AUTO_REUSE):
+    dec_embed = inp_func(inputs=dec_inp, type_id=dec_type)
 
-    #### Transformer layer
-    dec_tfm_func = _get_tfm_func(initializer, is_training, "pretrain")
+  #### Decoder TFM
+  with tf.variable_scope("decoder", reuse=tf.AUTO_REUSE):
+    dec_tfm_func = _get_tfm_func(initializer, is_training, "pretrain",
+                                 causal=True)
     dec_output, _ = dec_tfm_func(
         inputs=dec_embed,
         input_mask=dec_mask,

@@ -108,7 +108,7 @@ def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
              reuse=False, scope="input"):
   """Input layer for TFM used in machine translation."""
   tf_float = tf.bfloat16 if FLAGS.use_bfloat16 else tf.float32
-  tf.logging.info("===== Transformer =====")
+  tf.logging.info("===== Input layer =====")
   tf.logging.info("Input related:")
   tf.logging.info("  - inputs %s", inputs)
   tf.logging.info("  - type_id %s", type_id)
