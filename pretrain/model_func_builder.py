@@ -459,11 +459,11 @@ def dae_loss(features, labels, mems, n_token, is_training):
 
   #### Generator TFM
   with tf.variable_scope("generator", reuse=tf.AUTO_REUSE):
-    gen_func = _get_tfm_func(initializer,
+    gen_tfm_func = _get_tfm_func(initializer,
                              is_training,
                              "pretrain",
                              shrink=FLAGS.gen_shrink)
-    gen_output, _ = gen_func(
+    gen_output, _ = gen_tfm_func(
         inputs=gen_embed,
         input_mask=enc_mask,
         perm_mask=None)
@@ -509,8 +509,8 @@ def dae_loss(features, labels, mems, n_token, is_training):
 
   #### Encoder TFM
   with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
-    tfm_func = _get_tfm_func(initializer, is_training, "pretrain")
-    enc_output, _ = tfm_func(
+    enc_tfm_func = _get_tfm_func(initializer, is_training, "pretrain")
+    enc_output, _ = enc_tfm_func(
         inputs=enc_embed,
         input_mask=enc_mask,
         perm_mask=None)

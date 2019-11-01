@@ -284,7 +284,8 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
             dropout=dropout,
             dropatt=dropatt,
             is_training=is_training,
-            kernel_initializer=initializer)
+            kernel_initializer=initializer,
+            scope="self_attn")
 
         if context is not None:
           if context_mask is not None:
@@ -303,7 +304,8 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
               dropout=dropout,
               dropatt=dropatt,
               is_training=is_training,
-              kernel_initializer=initializer)
+              kernel_initializer=initializer,
+              scope="cross_attn")
 
         output, ffn_dict = positionwise_ffn(
             inp=output,
