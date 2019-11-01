@@ -125,6 +125,8 @@ flags.DEFINE_bool("attn_to_mask", default=True,
                   "the positions with [mask] tokens.")
 flags.DEFINE_float("edit_weight", default=10,
                    help="Weight to the edit loss.")
+flags.DEFINE_float("lm_weight", default=1,
+                   help="Weight to the decoder lm loss.")
 
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
@@ -177,6 +179,8 @@ def get_model_fn(n_token):
 
     #### Check model parameters
     num_params = sum([np.prod(v.shape) for v in tf.trainable_variables()])
+    for v in tf.trainable_variables():
+      tf.logging.info("%s: %d", v.name, np.prod(v.shape))
     tf.logging.info("#params: %d", num_params)
 
     if FLAGS.verbose:

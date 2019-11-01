@@ -288,16 +288,11 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
             scope="self_attn")
 
         if context is not None:
-          if context_mask is not None:
-            # [B x T] -> [B x N x F x T]
-            ctx_attn_mask = context_mask[:, None, :, None]
-          else:
-            ctx_attn_mask = None
           output, _ = multihead_attn(
               q=output,
               k=context,
               v=context,
-              attn_mask=ctx_attn_mask,
+              attn_mask=context_mask,
               d_model=d_model,
               n_head=n_head,
               d_head=d_head,
