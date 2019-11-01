@@ -8,12 +8,12 @@ import absl.logging as _logging  # pylint: disable=unused-import
 # pylint: disable=g-import-not-at-top
 try:
   import tensorflow.google as tf
-  import google3.experimental.users.zihangd.pretrain.mass_input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.dae_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 except ImportError as e:
   print(e)
   import tensorflow as tf
-  import mlm_input_func_builder as input_func_builder
+  import dae_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 # pylint: enable=g-import-not-at-top
 
@@ -33,8 +33,6 @@ flags.DEFINE_integer("seq_len", default=512,
 flags.DEFINE_string("split", default="train",
                     help="Data split.")
 flags.DEFINE_integer("num_core_per_host", default=16, help="num core per host")
-flags.DEFINE_integer("num_predict", default=80,
-                     help="Num of position to predict.")
 flags.DEFINE_integer("num_example", default=2,
                      help="Num of examples to see.")
 
@@ -53,7 +51,6 @@ def main(unused_argv):
       split=FLAGS.split,
       uncased=FLAGS.uncased,
       seq_len=FLAGS.seq_len,
-      num_predict=FLAGS.num_predict,
       bsz_per_host=FLAGS.bsz_per_host,
       num_hosts=1,
       num_core_per_host=FLAGS.num_core_per_host,
@@ -76,12 +73,12 @@ def main(unused_argv):
       for k, v in example_np.items():
         if v.ndim == 2:
           for i in range(v.shape[0]):
-            if k in ["enc_inp", "target", "dec_inp"]:
+            if k in ["gen_inp", "gen_tgt", "dec_inp", "dec_tgt", "inputs"]:
               print(k, v[i].shape, tokenizer.convert_ids_to_text(v[i].tolist()))
             else:
               print(k, v[i].shape, " ".join([str(j) for j in v[i].tolist()]))
         elif v.ndim == 1:
-          if k in ["enc_inp", "target", "dec_inp"]:
+          if k in ["gen_inp", "gen_tgt", "dec_inp", "dec_tgt", "inputs"]:
             print(k, v.shape, tokenizer.convert_ids_to_text(v.tolist()))
           else:
             print(k, v.shape, " ".join([str(j) for j in v.tolist()]))

@@ -22,7 +22,7 @@ try:
   import google3.experimental.users.zihangd.pretrain.optimization as optimization
   import google3.experimental.users.zihangd.pretrain.tpu_estimator_new as tpu_estimator
   import google3.experimental.users.zihangd.pretrain.model_func_builder as model_func_builder
-  import google3.experimental.users.zihangd.pretrain.mass_input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.dae_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 
   run_internal = True
@@ -32,7 +32,7 @@ except ImportError as e:
   import optimization
   import tpu_estimator_new as tpu_estimator
   import model_func_builder
-  import mass_input_func_builder as input_func_builder
+  import dae_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 
   run_internal = False
@@ -116,8 +116,6 @@ flags.DEFINE_string("eval_split", default="dev",
 ##### Data config
 flags.DEFINE_integer("seq_len", default=0,
                      help="tgt len for objective; 0 for not using it")
-flags.DEFINE_integer("num_predict", default=None,
-                     help="Number of masked tokens.")
 
 ##### Loss related
 flags.DEFINE_bool("tie_weight", default=True,
@@ -125,10 +123,8 @@ flags.DEFINE_bool("tie_weight", default=True,
 flags.DEFINE_bool("attn_to_mask", default=True,
                   help="For one-stream loss, whether allow model to attend "
                   "the positions with [mask] tokens.")
-flags.DEFINE_float("enc_weight", default=0.5,
-                   help="Weight to the encoder loss.")
-flags.DEFINE_float("dec_weight", default=0.5,
-                   help="Weight to the decoder loss.")
+flags.DEFINE_float("edit_weight", default=10,
+                   help="Weight to the edit loss.")
 
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
@@ -170,7 +166,7 @@ def get_model_fn(n_token):
         idx += 1
 
     #### Get loss from inputs
-    total_loss, new_mems, monitor_dict = model_func_builder.mass_loss(
+    total_loss, new_mems, monitor_dict = model_func_builder.dae_loss(
         features, labels, mems, n_token, is_training)
 
     #### Turn `new_mems` into `new_cache`
@@ -300,7 +296,6 @@ def get_input_fn(split):
       split=split,
       uncased=FLAGS.uncased,
       seq_len=FLAGS.seq_len,
-      num_predict=FLAGS.num_predict,
       bsz_per_host=batch_size // FLAGS.num_hosts,
       num_hosts=FLAGS.num_hosts,
       num_core_per_host=FLAGS.num_core_per_host,

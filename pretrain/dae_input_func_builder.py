@@ -1,15 +1,15 @@
-"""Create mass input function for TPUEstimator."""
+"""Create dae input function for TPUEstimator."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 import functools
+import math
 import os
 
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
-import numpy as np
 import tensorflow as tf
 
 # pylint: disable=g-import-not-at-top
@@ -17,155 +17,261 @@ try:
   from google3.experimental.users.zihangd.pretrain.data_utils import type_cast
   from google3.experimental.users.zihangd.pretrain.data_utils import sparse_to_dense
   from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import chunk_to_sequence
-  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import create_target_mapping
-  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import discrepancy_correction
 except ImportError as e:
   from data_utils import type_cast
   from data_utils import sparse_to_dense
   from mlm_input_func_builder import chunk_to_sequence
-  from mlm_input_func_builder import create_target_mapping
-  from mlm_input_func_builder import discrepancy_correction
 # pylint: enable=g-import-not-at-top
 
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_bool("origin_pos", default=False,
-                  help="Use the original enc position for the dec inputs.")
+flags.DEFINE_float("del_ratio", default=0.1,
+                   help="#delete / #tok ratio.")
+flags.DEFINE_float("ins_ratio", default=0.1,
+                   help="#insert / #tok ratio.")
+flags.DEFINE_float("rep_ratio", default=0.1,
+                   help="#replace / #tok ratio.")
+flags.DEFINE_integer("enc_len", default=256,
+                     help="Maximum encoder input length.")
+flags.DEFINE_integer("dec_len", default=256,
+                     help="Maximum decoder input length.")
+flags.DEFINE_integer("del_label", default=1,
+                     help="Edit label id for delete.")
+flags.DEFINE_integer("ins_label", default=2,
+                     help="Edit label id for insert.")
+flags.DEFINE_integer("rep_label", default=3,
+                     help="Edit label id for replace.")
 
 
-def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
-  """Turn begin and end indices into actual mask."""
-  non_func_mask = tf.not_equal(inputs, FLAGS.eos_id)
-  all_indices = tf.where(
-      non_func_mask,
-      tf.range(tgt_len, dtype=tf.int64),
-      tf.constant(-1, shape=[tgt_len], dtype=tf.int64))
-  candidate_matrix = tf.cast(
-      tf.logical_and(
-          all_indices[None, :] >= beg_indices[:, None],
-          all_indices[None, :] < end_indices[:, None]),
-      tf.float32)
-  cumsum_matrix = tf.reshape(
-      tf.cumsum(tf.reshape(candidate_matrix, [-1])),
-      [-1, tgt_len])
-  masked_matrix = (tf.cast(cumsum_matrix <= num_predict, tf.float32)
-                   * candidate_matrix)
-  target_mask = tf.reduce_sum(masked_matrix, axis=0)
-  is_masked = tf.cast(target_mask, tf.bool)
-
-  segment_range = tf.cast(tf.range(1, tf.shape(candidate_matrix)[0] + 1),
-                          dtype=candidate_matrix.dtype)
-  segment_matrix = segment_range[:, None] * candidate_matrix
-  segment_ids = tf.reduce_sum(segment_matrix * masked_matrix, axis=0)
-  segment_ids = tf.cast(segment_ids, dtype=inputs.dtype)
-
-  pos_mat = tf.cumsum(candidate_matrix, axis=1, exclusive=True)
-  pos_seq = tf.reduce_sum(pos_mat * masked_matrix, axis=0)
-
-  return is_masked, segment_ids, pos_seq
+def get_type_id(tgt_len, tgt_idx, type_val):
+  tgt_idx_left_shift = tgt_idx[:-1]
+  type_val_right_shift = type_val[1:]
+  new_type_id_shift = tf.scatter_nd(
+      shape=[tgt_len],
+      indices=tgt_idx_left_shift[:, None],
+      updates=type_val_right_shift
+      )
+  new_type_id_shift = tf.concat([type_val[:1], new_type_id_shift], axis=0)
+  new_type_id_shift = tf.math.cumsum(new_type_id_shift, exclusive=True)[1:]
+  new_type_id = tf.scatter_nd(
+      shape=[tgt_len],
+      indices=tgt_idx[:, None],
+      updates=type_val
+      )
+  new_type_id = tf.math.cumsum(new_type_id, exclusive=True)
+  new_type_id = new_type_id_shift - new_type_id
+  return new_type_id
 
 
-def _token_span_mask(inputs, tgt_len, num_predict):
-  """Sample token spans as prediction targets."""
-  mask_alpha = tgt_len / num_predict
-  round_to_int = lambda x: tf.cast(x, tf.int64)
+def create_dae_features(example, seq_len, use_bfloat16):
+  """Create features used for DAE seq2seq pretraining."""
+  ##### original sequence of length `seq_len - 1`
+  inputs = example.pop("inputs")
+  tf_int = inputs.dtype
 
-  # Sample span lengths from a zipf distribution
-  span_len_seq = np.arange(FLAGS.min_tok, FLAGS.max_tok + 1)
-  probs = np.array([1.0 /  (i + 1) for i in span_len_seq])
+  # Append <eos>
+  inputs = tf.concat(
+      [inputs, tf.constant(FLAGS.eos_id, shape=[1], dtype=tf_int)], 0)
+  eos_mask = tf.equal(inputs, FLAGS.eos_id)
+  non_eos_mask = tf.logical_not(eos_mask)
 
-  probs /= np.sum(probs)
-  logits = tf.constant(np.log(probs), dtype=tf.float32)
-  span_lens = tf.random.categorical(
-      logits=logits[None],
-      num_samples=num_predict,
-      dtype=tf.int64,
-  )[0] + FLAGS.min_tok
+  type_id = example.pop("type_id")
+  type_id = tf.concat([type_id, type_id[-1:]], 0)
 
-  # Sample the ratio [0.0, 1.0) of left context lengths
-  span_lens_float = tf.cast(span_lens, tf.float32)
-  left_ratio = tf.random.uniform(shape=[num_predict], minval=0.0, maxval=1.0)
-  left_ctx_len = left_ratio * span_lens_float * (mask_alpha - 1)
-  left_ctx_len = round_to_int(left_ctx_len)
+  ##### Sample positions for different operations
+  # (1) Sample deletion positions
+  del_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
+  del_mask = tf.logical_and(del_rand < FLAGS.del_ratio, non_eos_mask)
+  non_del_mask = tf.logical_not(del_mask)
 
-  # Compute the offset from left start to the right end
-  right_offset = round_to_int(span_lens_float * mask_alpha) - left_ctx_len
+  # (2) Sample insertion positions given deletion
+  ins_num = int(math.ceil(seq_len * FLAGS.ins_ratio))
+  right_shift_del_mask = tf.concat(
+      [tf.constant(False, shape=[1], dtype=tf.bool), del_mask[:-1]], axis=0)
+  non_ins_mask = tf.logical_or(del_mask, right_shift_del_mask)
+  non_ins_mask = tf.logical_or(non_ins_mask, eos_mask)
+  ins_uniform = tf.random.uniform(shape=[ins_num, seq_len], minval=0, maxval=1)
+  ins_uniform -= 10 * tf.cast(non_ins_mask, tf.float32)
+  ins_idx = tf.argmax(ins_uniform, axis=1)
+  ins_cnt = tf.reduce_sum(tf.one_hot(ins_idx, seq_len, dtype=tf_int), 0)
 
-  # Get the actual begin and end indices
-  beg_indices = (tf.cumsum(left_ctx_len) +
-                 tf.cumsum(right_offset, exclusive=True))
-  end_indices = beg_indices + span_lens
+  # (3) Sample replace positions given deletion & insertion
+  rep_num = int(math.ceil(seq_len * FLAGS.rep_ratio))
+  non_rep_mask = tf.logical_or(tf.greater(ins_cnt, 0), non_ins_mask)
+  non_rep_mask = tf.logical_or(non_rep_mask, eos_mask)
+  rep_uniform = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
+  rep_uniform -= 10 * tf.cast(non_rep_mask, tf.float32)
+  _, rep_idx = tf.math.top_k(rep_uniform, k=rep_num)
+  rep_mask = tf.logical_and(
+      tf.reduce_sum(tf.one_hot(rep_idx, seq_len, dtype=tf_int), 0) > 0,
+      tf.logical_not(non_rep_mask))
 
-  # Remove out of range indices
-  valid_idx_mask = end_indices <= tgt_len
-  beg_indices = tf.boolean_mask(beg_indices, valid_idx_mask)
-  end_indices = tf.boolean_mask(end_indices, valid_idx_mask)
+  # change replaced locations to <mask>
+  rep_input = tf.where(
+      rep_mask,
+      tf.constant(FLAGS.mask_id, shape=[seq_len], dtype=tf_int),
+      inputs)
 
-  # Shuffle valid indices
-  num_valid = tf.cast(tf.shape(beg_indices)[0], tf.int64)
-  order = tf.random_shuffle(tf.range(num_valid, dtype=tf.int64))
-  beg_indices = tf.gather(beg_indices, order)
-  end_indices = tf.gather(end_indices, order)
+  ######### construct features
+  ori_idx = tf.range(seq_len, dtype=tf_int)
 
-  return _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len,
-                           num_predict)
+  ##### encoder features
+  # map `ori_idx` to `enc_idx`
+  enc_shift = ins_cnt - tf.cast(del_mask, tf_int)
+  enc_shift = tf.cumsum(enc_shift)
+  enc_shift_idx = ori_idx + enc_shift
 
+  # exclude idx larger than `FLAGS.enc_len` and deleted positions
+  enc_valid_mask = tf.logical_and(enc_shift_idx < FLAGS.enc_len, non_del_mask)
+  enc_idx = tf.boolean_mask(enc_shift_idx, enc_valid_mask)
+  enc_val = tf.boolean_mask(rep_input, enc_valid_mask)
+  enc_type = tf.boolean_mask(type_id, enc_valid_mask)
 
-def create_mass_target(example, seq_len, num_predict, use_bfloat16):
-  """docs."""
-  inputs = example["inputs"]
+  # encoder padding mask
+  enc_non_pad_len = tf.math.reduce_max(enc_idx) + 1
+  enc_pad_len = FLAGS.enc_len - enc_non_pad_len
+  enc_mask = tf.concat(
+      [tf.zeros(shape=[enc_non_pad_len], dtype=tf.float32),
+       tf.ones(shape=[enc_pad_len], dtype=tf.float32)], 0)
+  enc_mask.set_shape([FLAGS.enc_len])
 
-  # sample mask
-  is_masked, segment_ids, pos_seq = _token_span_mask(
-      inputs, seq_len, num_predict)
+  # (a) Map all non-padding positions to `mask_id`
+  enc_seq = tf.concat(
+      [tf.zeros(shape=[enc_non_pad_len], dtype=tf_int) + FLAGS.mask_id,
+       tf.zeros(shape=[enc_pad_len], dtype=tf_int) + FLAGS.pad_id], 0)
+  enc_seq.set_shape([FLAGS.enc_len])
+  # (b) Scatter replaced input to proper positions: unscattered positions remain
+  # to be `mask_id` for insertion
+  enc_seq = tf.tensor_scatter_nd_update(
+      enc_seq,
+      indices=enc_idx[:, None],
+      updates=enc_val)
 
-  # get masked input (encoder input)
-  masked_input = discrepancy_correction(inputs, is_masked, seq_len)
-  example["enc_inp"] = tf.reshape(masked_input, [seq_len])
-  example["enc_pos"] = tf.range(seq_len, dtype=pos_seq.dtype)
+  enc_type = get_type_id(FLAGS.enc_len, enc_idx, enc_type)
 
-  if FLAGS.origin_pos:
-    pos_seq = example["enc_pos"] - 1
+  ##### generator features
+  is_masked = tf.equal(enc_seq, FLAGS.mask_id)
 
-  # create target mapping
-  create_target_mapping(example, is_masked, seq_len, num_predict,
-                        target=inputs, dec_seg=segment_ids, dec_pos=pos_seq,
-                        dec_type=example["type_id"])
-  # example["dec_pos"] = tf.range(num_predict, dtype=pos_seq.dtype)
+  # gen_mask_map: extract `num_mask` sub-seq from `enc_len` full-seq
+  indices = tf.range(FLAGS.enc_len, dtype=tf_int)
+  indices = tf.boolean_mask(indices, is_masked)
+  num_mask = rep_num + ins_num
+  actual_num_mask = tf.shape(indices)[0]
+  map_pad_len = num_mask - actual_num_mask
+  gen_mask_map = tf.one_hot(indices, FLAGS.enc_len, dtype=tf.float32)
+  map_padding = tf.zeros([map_pad_len, FLAGS.enc_len], dtype=gen_mask_map.dtype)
+  gen_mask_map = tf.concat([gen_mask_map, map_padding], axis=0)
+  gen_mask_map = tf.reshape(gen_mask_map, [num_mask, FLAGS.enc_len])
 
-  # construct decoder input
-  target = example["target"]
-  eos_tensor = tf.constant(FLAGS.eos_id, shape=[1], dtype=target.dtype)
-  dec_inp = tf.concat([eos_tensor, target[:-1]], 0)
+  # gen_tgt_mask: only `rep_num` 1s in the sequence of length `num_mask`
+  no_ins_inp = tf.scatter_nd(shape=[FLAGS.enc_len],
+                             indices=enc_idx[:, None],
+                             updates=enc_val)
+  is_rep = tf.equal(no_ins_inp, FLAGS.mask_id)
+  gen_tgt_mask = tf.boolean_mask(is_rep, is_masked)
+  gen_tgt_mask.set_shape([num_mask])
 
-  seg_ids = example["dec_seg"]
-  eos_mask = tf.not_equal(tf.concat([seg_ids[:1], seg_ids[:-1]], 0), seg_ids)
-  dec_inp = tf.where(eos_mask,
-                     tf.broadcast_to(eos_tensor, [num_predict]),
-                     dec_inp)
+  # gen_tgt: scatter `rep_num` replaced ids to the correct positions in the
+  # sequence of total length `num_mask` (others correspond to insertions)
+  enc_valid_rep_mask = tf.logical_and(rep_mask, enc_shift_idx < FLAGS.enc_len)
+  gen_tgt_val = tf.boolean_mask(inputs, enc_valid_rep_mask)
+  gen_tgt_idx = tf.boolean_mask(tf.range(num_mask, dtype=tf_int), gen_tgt_mask)
+  gen_tgt = tf.tensor_scatter_nd_update(
+      tf.constant(FLAGS.pad_id, shape=[num_mask], dtype=tf_int),
+      indices=gen_tgt_idx[:, None],
+      updates=gen_tgt_val)
+
+  ##### decoder features
+  # We do not delete any token for decoder: the shift only comes from insertion
+  dec_shift = tf.cumsum(ins_cnt)
+  dec_idx = ori_idx + dec_shift
+
+  # Similarlly, exclude idx larger than `FLAGS.dec_len`
+  dec_valid_mask = dec_idx < FLAGS.dec_len
+  dec_idx = tf.boolean_mask(dec_idx, dec_valid_mask)
+  dec_val = tf.boolean_mask(inputs, dec_valid_mask)
+  dec_type = tf.boolean_mask(type_id, dec_valid_mask)
+
+  # decoder mask
+  dec_non_pad_len = tf.math.reduce_max(dec_idx) + 1
+  dec_pad_len = FLAGS.dec_len - dec_non_pad_len
+  dec_mask = tf.concat(
+      [tf.zeros(shape=[dec_non_pad_len], dtype=tf.float32),
+       tf.ones(shape=[dec_pad_len], dtype=tf.float32)], 0)
+  dec_mask.set_shape([FLAGS.dec_len])
+
+  # (a) Map all non-padding positions to `ins_id`
+  dec_seq = tf.concat(
+      [tf.zeros(shape=[dec_non_pad_len], dtype=tf_int) + FLAGS.ins_id,
+       tf.zeros(shape=[dec_pad_len], dtype=tf_int) + FLAGS.pad_id], 0)
+  dec_seq.set_shape([FLAGS.dec_len])
+
+  # (b) Scatter original input to proper positions: unscattered positions remain
+  # to be `ins_id` for insertion
+  dec_seq = tf.tensor_scatter_nd_update(
+      dec_seq,
+      indices=dec_idx[:, None],
+      updates=dec_val)
+
+  # decoder input
+  dec_inp = tf.concat([tf.constant(FLAGS.eos_id, shape=[1], dtype=tf_int),
+                       dec_seq[:-1]], 0)
+
+  # decoder type
+  dec_type = get_type_id(FLAGS.dec_len, dec_idx, dec_type)
+  dec_type = tf.concat([dec_type[:1], dec_type[:-1]], 0)
+
+  # edit type label
+  dec_ins_mask = tf.equal(dec_seq, FLAGS.ins_id)
+  dec_rep_mask = tf.scatter_nd(
+      shape=[FLAGS.dec_len],
+      indices=dec_idx[:, None],
+      updates=tf.boolean_mask(rep_mask, dec_valid_mask)
+  )
+  dec_del_mask = tf.scatter_nd(
+      shape=[FLAGS.dec_len],
+      indices=dec_idx[:, None],
+      updates=tf.boolean_mask(del_mask, dec_valid_mask)
+  )
+  edit_label = tf.cast(dec_ins_mask, tf_int) * FLAGS.ins_label
+  edit_label += tf.cast(dec_rep_mask, tf_int) * FLAGS.rep_label
+  edit_label += tf.cast(dec_del_mask, tf_int) * FLAGS.del_label
+
+  ##### Put everything into the example
+  example["gen_inp"] = enc_seq
+  example["gen_tgt"] = gen_tgt
+  example["gen_mask_map"] = gen_mask_map
+  example["gen_tgt_mask"] = tf.cast(gen_tgt_mask, tf.float32)
+
+  example["enc_type"] = enc_type
+  example["enc_mask"] = enc_mask
+
   example["dec_inp"] = dec_inp
+  example["dec_tgt"] = dec_seq
+  example["dec_type"] = dec_type
+  example["dec_mask"] = dec_mask
+  example["edit_label"] = edit_label
 
-  # type cast for example
+  ##### type cast for example
   type_cast(example, use_bfloat16)
-
   for k, v in example.items():
     tf.logging.info("%s: %s", k, v)
 
   return example
 
 
-def mass_process(dataset, seq_len, num_predict, use_bfloat16):
-  """Process input tfrecords into proper format for MASS training."""
-  dataset = chunk_to_sequence(dataset, seq_len)
+def dae_process(dataset, seq_len, use_bfloat16):
+  """Process input tfrecords into proper format for dae training."""
+  # `- 1` to account for <eos>
+  dataset = chunk_to_sequence(dataset, seq_len - 1)
 
-  # Create mass target
-  create_mass_target_mapper = functools.partial(
-      create_mass_target,
+  # Create dae target
+  dae_features_mapper = functools.partial(
+      create_dae_features,
       seq_len=seq_len,
-      num_predict=num_predict,
       use_bfloat16=use_bfloat16)
-  dataset = dataset.map(create_mass_target_mapper, num_parallel_calls=64)
+  dataset = dataset.map(dae_features_mapper, num_parallel_calls=64)
 
   return dataset
 
@@ -238,18 +344,17 @@ def parse_record(dataset,
   return dataset
 
 
-def sent_mass_dataset(params,
+def sent_dae_dataset(params,
                       file_names,
                       num_hosts,
                       num_core_per_host,
                       seq_len,
-                      num_predict,
                       is_training,
                       use_bfloat16=False,
                       num_threads=64,
                       record_shuffle_size=4096,
                       sequence_shuffle_size=2048):
-  """Get sentence level mass dataset."""
+  """Get sentence level dae dataset."""
   bsz_per_core = params["batch_size"]
   if num_hosts > 1:
     host_id = params["context"].current_host
@@ -273,7 +378,7 @@ def sent_mass_dataset(params,
                          record_shuffle_size=record_shuffle_size)
 
   # process dataset
-  dataset = mass_process(dataset, seq_len, num_predict, use_bfloat16)
+  dataset = dae_process(dataset, seq_len, use_bfloat16)
 
   # Sequence level shuffle
   if is_training and sequence_shuffle_size:
@@ -290,25 +395,24 @@ def sent_mass_dataset(params,
   return dataset
 
 
-def semidoc_mass_dataset(params,
+def semidoc_dae_dataset(params,
                          file_names,
                          num_hosts,
                          num_core_per_host,
                          seq_len,
-                         num_predict,
                          is_training,
                          use_bfloat16=False,
                          num_threads=64,
                          record_shuffle_size=256,
                          sequence_shuffle_size=2048):
   # pylint: disable=g-doc-args
-  """Get semi-doc level mass dataset.
+  """Get semi-doc level dae dataset.
 
   Notes:
   - Each sequence comes from the same document (except for boundary cases).
-    This is different from the standard sent-level mass dataset.
+    This is different from the standard sent-level dae dataset.
   - No consecutivity is ensured across batches, which is different from the
-    standard doc-level mass dataset.
+    standard doc-level dae dataset.
   - Effectively, semi-doc dataset maintains short range (seq_len) dependency,
     which is more random than doc-level and less random than sent-level.
 
@@ -339,7 +443,7 @@ def semidoc_mass_dataset(params,
                          record_shuffle_size=record_shuffle_size)
 
   # process dataset
-  dataset = mass_process(dataset, seq_len, num_predict, use_bfloat16)
+  dataset = dae_process(dataset, seq_len, use_bfloat16)
 
   # Sequence level shuffle
   if is_training and sequence_shuffle_size:
@@ -356,17 +460,16 @@ def semidoc_mass_dataset(params,
   return dataset
 
 
-def doc_mass_dataset(params,
-                     file_names,
-                     num_hosts,
-                     num_core_per_host,
-                     seq_len,
-                     num_predict,
-                     is_training,
-                     use_bfloat16=False,
-                     num_threads=64,
-                     record_shuffle_size=256):
-  """Get document level mass dataset."""
+def doc_dae_dataset(params,
+                    file_names,
+                    num_hosts,
+                    num_core_per_host,
+                    seq_len,
+                    is_training,
+                    use_bfloat16=False,
+                    num_threads=64,
+                    record_shuffle_size=256):
+  """Get document level dae dataset."""
 
   bsz_per_core = params["batch_size"]
   if num_hosts > 1:
@@ -415,9 +518,8 @@ def doc_mass_dataset(params,
     shards = [dataset.shard(bsz_per_core, i) for i in range(bsz_per_core)]
 
   # process each shard
-  process_shard = functools.partial(mass_process,
+  process_shard = functools.partial(dae_process,
                                     seq_len=seq_len,
-                                    num_predict=num_predict,
                                     use_bfloat16=use_bfloat16)
   shards = [process_shard(dataset=shard) for shard in shards]
 
@@ -445,7 +547,6 @@ def get_input_fn(
     split,
     uncased,
     seq_len,
-    num_predict,
     bsz_per_host,
     num_hosts=1,
     num_core_per_host=1,
@@ -481,7 +582,7 @@ def get_input_fn(
   sent_files = dir_to_paths(sent_dir, "sent")
 
   file_list = [doc_files, semi_files, sent_files]
-  func_list = [doc_mass_dataset, semidoc_mass_dataset, sent_mass_dataset]
+  func_list = [doc_dae_dataset, semidoc_dae_dataset, sent_dae_dataset]
 
   def input_fn(params):
     """Construct input function for TPUEstimator."""
@@ -497,7 +598,6 @@ def get_input_fn(
             is_training=split == "train",
             file_names=files,
             seq_len=seq_len,
-            num_predict=num_predict,
             use_bfloat16=use_bfloat16,
             **kwargs)
 

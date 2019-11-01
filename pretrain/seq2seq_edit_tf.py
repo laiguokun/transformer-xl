@@ -88,7 +88,6 @@ def main(argv):
   type_val = tf.boolean_mask(type_id, tf.logical_and(non_del_mask, valid_tgt))
 
   max_len = tf.math.reduce_max(tgt_idx) + 1
-  
   enc_type_id = get_type_id(tgt_len, tgt_idx, type_val)
 
   enc_seq = tf.scatter_nd(

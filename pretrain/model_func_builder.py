@@ -89,15 +89,15 @@ def _get_inp_func(n_token, d_embed, initializer, is_training, **kwargs):
   return inp_func
 
 
-def _get_tfm_func(initializer, is_training, phase, **kwargs):
+def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
   """Prepare transformer function."""
 
   tfm_args = dict(
       n_layer=FLAGS.n_layer,
-      d_model=FLAGS.d_model,
-      n_head=FLAGS.n_head,
+      d_model=FLAGS.d_model // shrink,
+      n_head=FLAGS.n_head // shrink,
       d_head=FLAGS.d_head,
-      d_inner=FLAGS.d_inner,
+      d_inner=FLAGS.d_inner // shrink,
       dropout=FLAGS.dropout,
       dropatt=FLAGS.dropatt,
       dropact=FLAGS.dropact,
@@ -308,11 +308,7 @@ def mass_loss(features, labels, mems, n_token, is_training):
 
   enc_inp = features["enc_inp"]
   enc_type = features["type_id"]
-
-  bsz = tf.shape(enc_inp)[0]
-  enc_len = tf.shape(enc_inp)[1]
-  enc_pos = tf.cast(tf.range(enc_len), tf_float)
-  enc_pos = tf.broadcast_to(enc_pos, [bsz, enc_len])
+  enc_pos = features["enc_pos"]
 
   dec_inp = features["dec_inp"]
   dec_type = features["dec_type"]
@@ -320,6 +316,8 @@ def mass_loss(features, labels, mems, n_token, is_training):
   dec_seg = features["dec_seg"]
 
   # shapes
+  bsz = tf.shape(enc_inp)[0]
+  enc_len = tf.shape(enc_inp)[1]
   dec_len = tf.shape(dec_inp)[1]
 
   ##### format inputs
@@ -411,14 +409,181 @@ def mass_loss(features, labels, mems, n_token, is_training):
     num_loss = tf.reduce_sum(loss_mask)
     avg_dec_loss = tf.reduce_sum(dec_loss * loss_mask) / num_loss
     avg_enc_loss = tf.reduce_sum(enc_loss * loss_mask) / num_loss
-    total_loss = (avg_dec_loss + avg_enc_loss) / 2
 
-  # To be compatible with fairseq, convert to base 2 for logging
-  monitor_dict = {
-      "loss": total_loss,
-      "loss_dec": avg_dec_loss,
-      "loss_enc": avg_enc_loss,
-  }
+  monitor_dict = {}
+  total_loss = 0
+  if FLAGS.enc_weight > 0:
+    total_loss += FLAGS.enc_weight * avg_enc_loss
+    monitor_dict["loss_enc"] = avg_enc_loss
+  if FLAGS.dec_weight > 0:
+    total_loss += FLAGS.dec_weight * avg_dec_loss
+    monitor_dict["loss_dec"] = avg_dec_loss
+
+  monitor_dict["loss"] = total_loss
+
+  return total_loss, {}, monitor_dict
+
+
+@bf16_decorator
+def dae_loss(features, labels, mems, n_token, is_training):
+  """DAE loss with generator."""
+  del mems
+  del labels
+
+  initializer = _get_initializer()
+  monitor_dict = {}
+
+  ##### unpack input
+  gen_inp = features["gen_inp"]
+  gen_tgt = features["gen_tgt"]
+  gen_mask_map = features["gen_mask_map"]
+  gen_tgt_mask = features["gen_tgt_mask"]
+
+  enc_mask = features["enc_mask"]
+  enc_type = features["enc_type"]
+
+  dec_inp = features["dec_inp"]
+  dec_tgt = features["dec_tgt"]
+  dec_mask = features["dec_mask"]
+  dec_type = features["dec_type"]
+  edit_label = features["edit_label"]
+
+  #### Shared input embedding
+  with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
+    enc_inp_func = _get_inp_func(n_token,
+                                 FLAGS.d_model,
+                                 initializer,
+                                 is_training)
+    gen_embed, shared_embed_table = enc_inp_func(
+        inputs=gen_inp, type_id=None, return_embed_table=True)
+
+  #### Generator
+  with tf.variable_scope("generator", reuse=tf.AUTO_REUSE):
+    #### Transformer layer
+    gen_func = _get_tfm_func(initializer,
+                             is_training,
+                             "pretrain",
+                             shrink=FLAGS.gen_shrink)
+    gen_output, _ = gen_func(
+        inputs=gen_embed,
+        input_mask=enc_mask,
+        perm_mask=None)
+
+    gen_lm_loss, _, logits = model.lm_loss(
+        hidden=gen_output,
+        target=gen_tgt,
+        n_token=n_token,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        lookup_table=shared_embed_table,
+        tie_weight=FLAGS.tie_weight,
+        target_mapping=None,
+        hidden_mapping=gen_mask_map,
+        return_logits=True,
+        use_tpu=FLAGS.use_tpu)
+
+    if gen_lm_loss.dtype != tf.float32:
+      gen_lm_loss = tf.cast(gen_lm_loss, tf.float32)
+    gen_tgt_mask = tf.cast(gen_tgt_mask, gen_lm_loss.dtype)
+    gen_loss = (tf.reduce_sum(gen_lm_loss * gen_tgt_mask) /
+                tf.reduce_sum(gen_tgt_mask))
+    monitor_dict["gen_loss"] = gen_loss
+
+    total_loss = gen_loss
+
+  #### Sample from generator
+  uniform = tf.random.uniform(minval=0, maxval=1, shape=logits.shape,
+                              dtype=tf.float32)
+  gumbel = -tf.log(-tf.log(uniform + 1e-9) + 1e-9)
+  samples = tf.argmax(logits + gumbel, -1)
+
+  # map `num_predict` samples to full length
+  samples = tf.einsum("bm,bml->bl",
+                      tf.cast(samples, tf.float32),
+                      tf.cast(gen_mask_map, tf.float32))
+  samples = tf.cast(samples, tf.int32)
+  enc_inp = tf.where(tf.equal(gen_inp, FLAGS.mask_id), samples, gen_inp)
+
+  #### Shared input embedding
+  with tf.variable_scope("encoder", reuse=tf.AUTO_REUSE):
+    #### Input layer
+    enc_embed = enc_inp_func(inputs=enc_inp, type_id=enc_type)
+
+    #### Transformer layer
+    tfm_func = _get_tfm_func(initializer, is_training, "pretrain")
+    enc_output, _ = tfm_func(
+        inputs=enc_embed,
+        input_mask=enc_mask,
+        perm_mask=None)
+
+  #### Discriminator
+  with tf.variable_scope("decoder", reuse=tf.AUTO_REUSE):
+    #### Input layer
+    dec_inp_func = _get_inp_func(n_token,
+                                 FLAGS.d_model,
+                                 initializer,
+                                 is_training)
+    dec_embed = dec_inp_func(inputs=dec_inp, type_id=dec_type,
+                             word_embed_table=shared_embed_table)
+
+    #### Transformer layer
+    dec_tfm_func = _get_tfm_func(initializer, is_training, "pretrain")
+    dec_output, _ = dec_tfm_func(
+        inputs=dec_embed,
+        input_mask=dec_mask,
+        context=enc_output,
+        context_mask=enc_mask,
+        perm_mask=None)
+
+    #### edit type loss
+    edit_loss, edit_logits = model.cls_loss(
+        hidden=dec_output,
+        target=edit_label,
+        n_cls=4,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        target_mapping=None,
+        hidden_mapping=None,
+        return_logits=True,
+        scope="edit_type_loss")
+
+    dec_tgt_mask = tf.cast(1.0 - dec_mask, tf.float32)
+    edit_loss = (tf.reduce_sum(edit_loss * dec_tgt_mask) /
+                 tf.reduce_sum(dec_tgt_mask))
+
+    edit_pred = tf.cast(tf.argmax(edit_logits, axis=-1), dtype=edit_label.dtype)
+    edit_corr = tf.cast(tf.equal(edit_pred, edit_label), dtype=tf.float32)
+    edit_accu = (tf.reduce_sum(edit_corr * dec_tgt_mask) /
+                 tf.reduce_sum(dec_tgt_mask))
+
+    # monitor
+    monitor_dict["edit_loss"] = edit_loss
+    monitor_dict["edit_accu"] = edit_accu
+
+    # accumulate total loss
+    total_loss += FLAGS.edit_weight * edit_loss
+
+    #### next-token prediction loss
+    lm_loss = model.lm_loss(
+        hidden=dec_output,
+        target=dec_tgt,
+        n_token=n_token,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        lookup_table=shared_embed_table,
+        tie_weight=FLAGS.tie_weight,
+        target_mapping=None,
+        hidden_mapping=None,
+        use_tpu=FLAGS.use_tpu)
+
+    lm_loss = (tf.reduce_sum(lm_loss * dec_tgt_mask) /
+               tf.reduce_sum(dec_tgt_mask))
+
+    # monitor
+    monitor_dict["lm_loss"] = lm_loss
+
+    # accumulate total loss
+    total_loss += lm_loss
 
   return total_loss, {}, monitor_dict
 

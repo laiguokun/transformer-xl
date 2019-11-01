@@ -19,9 +19,10 @@ flags.DEFINE_integer("eos_id", default=None, help="")
 flags.DEFINE_integer("cls_id", default=None, help="")
 flags.DEFINE_integer("sep_id", default=None, help="")
 flags.DEFINE_integer("pad_id", default=None, help="")
-flags.DEFINE_integer("mask_id", default=None, help="")
 flags.DEFINE_integer("eod_id", default=None, help="")
 flags.DEFINE_integer("eop_id", default=None, help="")
+flags.DEFINE_integer("mask_id", default=None, help="")
+flags.DEFINE_integer("ins_id", default=None, help="")
 
 flags.DEFINE_integer("seg_id_a", default=0, help="segment id of segment A.")
 flags.DEFINE_integer("seg_id_b", default=1, help="segment id of segment B.")
@@ -38,9 +39,10 @@ default_symbols_mapping = collections.OrderedDict([
     ("<cls>", "cls_id"),
     ("<sep>", "sep_id"),
     ("<pad>", "pad_id"),
-    ("<mask>", "mask_id"),
     ("<eod>", "eod_id"),
-    ("<eop>", "eop_id")
+    ("<eop>", "eop_id"),
+    ("<mask>", "mask_id"),
+    ("<ins>", "ins_id"),
 ])
 
 

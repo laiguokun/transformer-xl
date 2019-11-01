@@ -149,7 +149,7 @@ def get_dataset(params,
                 num_threads=64,
                 prefetch_size=None,
                 record_shuffle_size=10240,
-                batch_shuffle_size=512,
+                batch_shuffle_size=2048,
                 max_records=-1):
   """Build a Dataset for this problem."""
   #### Split data files across hosts

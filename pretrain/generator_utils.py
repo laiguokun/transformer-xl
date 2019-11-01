@@ -66,7 +66,7 @@ def pack_dataset(dataset, length, keys=None, use_custom_ops=False):
     # return _pack_with_custom_ops(dataset, keys, length)
   else:
     packer = SequenceDatasetPacker(length, spacing=0, queue_size=10)
-    return packer(dataset, cycle_length=10, keys=keys)
+    return packer(dataset, cycle_length=20, keys=keys)
 
 
 #####################################

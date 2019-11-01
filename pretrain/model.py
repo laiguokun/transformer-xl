@@ -86,6 +86,10 @@ flags.DEFINE_bool("untie_r", default=True,
 flags.DEFINE_integer("mem_len", default=0,
                      help="Number of steps to cache")
 
+# Generator specific
+flags.DEFINE_integer("gen_shrink", default=4,
+                     help="Shrink the hidden dimension of the generator.")
+
 ##### Parameter initialization
 flags.DEFINE_enum("init", default="truncated_normal",
                   enum_values=["normal", "uniform", "truncated_normal"],
@@ -224,8 +228,9 @@ def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
 
 def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
                 dropout, dropatt, dropact, initializer, is_training,
-                input_mask=None, perm_mask=None, ff_activation="gelu",
-                causal=False, return_all_hidden=False, scope="transformer"):
+                context=None, context_mask=None, input_mask=None,
+                perm_mask=None, ff_activation="gelu", causal=False,
+                return_all_hidden=False, scope="transformer"):
   """Transformer model."""
 
   monitor_dict = {}
@@ -281,6 +286,25 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
             is_training=is_training,
             kernel_initializer=initializer)
 
+        if context is not None:
+          if context_mask is not None:
+            # [B x T] -> [B x N x F x T]
+            ctx_attn_mask = context_mask[:, None, :, None]
+          else:
+            ctx_attn_mask = None
+          output, _ = multihead_attn(
+              q=output,
+              k=context,
+              v=context,
+              attn_mask=ctx_attn_mask,
+              d_model=d_model,
+              n_head=n_head,
+              d_head=d_head,
+              dropout=dropout,
+              dropatt=dropatt,
+              is_training=is_training,
+              kernel_initializer=initializer)
+
         output, ffn_dict = positionwise_ffn(
             inp=output,
             d_model=d_model,
@@ -305,6 +329,46 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
       return output, monitor_dict
 
 
+def cls_loss(hidden, target, n_cls, d_model, initializer, hidden_mapping=None,
+             target_mapping=None, return_logits=False, use_tpu=False,
+             scope="cls_loss", reuse=False):
+  """Compute classification cross entropy loss."""
+
+  tf.logging.info("===== Language model loss =====")
+  tf.logging.info("  - hidden_mapping %s", hidden_mapping)
+  tf.logging.info("  - target_mapping %s", target_mapping)
+  tf.logging.info("===============================")
+
+  if hidden_mapping is not None:
+    hidden = tf.einsum("bld,bml->bmd", hidden, hidden_mapping)
+
+  if target_mapping is not None:
+    target = tf.einsum("bl,bml->bm", target, target_mapping)
+
+  with tf.variable_scope(scope, reuse=reuse):
+    softmax_w = tf.get_variable("weight", [n_cls, d_model],
+                                dtype=hidden.dtype, initializer=initializer)
+    softmax_b = tf.get_variable("bias", [n_cls], dtype=hidden.dtype,
+                                initializer=tf.zeros_initializer())
+    logits = tf.einsum("bid,nd->bin", hidden, softmax_w) + softmax_b
+
+    if logits.dtype != tf.float32:
+      # Always use float32 for cross entropy loss
+      logits = tf.cast(logits, tf.float32)
+
+    if use_tpu:
+      onehot_target = tf.one_hot(target, n_cls, dtype=logits.dtype)
+      loss = -tf.reduce_sum(tf.nn.log_softmax(logits) * onehot_target, -1)
+    else:
+      loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target,
+                                                            logits=logits)
+
+    if return_logits:
+      return loss, logits
+    else:
+      return loss
+
+
 def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
             tie_weight=False, hidden_mapping=None, target_mapping=None,
             label_smooth=None, return_logits=False, use_tpu=False):
@@ -326,7 +390,7 @@ def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
 
   # Apply one more non-linear transformation before the output layer.
   # This matrix is not used after pre-training.
-  if FLAGS.lm_proj:
+  if FLAGS.lm_proj or hidden.shape.as_list()[-1] != d_model:
     with tf.variable_scope("lm_proj"):
       hidden = tf.layers.dense(
           hidden,
