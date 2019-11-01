@@ -447,6 +447,7 @@ def dae_loss(features, labels, mems, n_token, is_training):
   dec_mask = features["dec_mask"]
   dec_type = features["dec_type"]
   edit_label = features["edit_label"]
+  dec_mask_map = features["dec_mask_map"]
 
   #### Shared input embedding (for generator)
   with tf.variable_scope("input", reuse=tf.AUTO_REUSE):
@@ -559,17 +560,30 @@ def dae_loss(features, labels, mems, n_token, is_training):
     total_loss += FLAGS.edit_weight * edit_loss
 
     #### next-token prediction loss
-    lm_loss = model.lm_loss(
-        hidden=dec_output,
-        target=dec_tgt,
-        n_token=n_token,
-        d_model=FLAGS.d_model,
-        initializer=initializer,
-        lookup_table=shared_embed_table,
-        tie_weight=FLAGS.tie_weight,
-        target_mapping=None,
-        hidden_mapping=None,
-        use_tpu=FLAGS.use_tpu)
+    if FLAGS.mask_edited_only:
+      lm_loss = model.lm_loss(
+          hidden=dec_output,
+          target=dec_tgt,
+          n_token=n_token,
+          d_model=FLAGS.d_model,
+          initializer=initializer,
+          lookup_table=shared_embed_table,
+          tie_weight=FLAGS.tie_weight,
+          target_mapping=None,
+          hidden_mapping=dec_mask_map,
+          use_tpu=FLAGS.use_tpu)      
+    else:
+      lm_loss = model.lm_loss(
+          hidden=dec_output,
+          target=dec_tgt,
+          n_token=n_token,
+          d_model=FLAGS.d_model,
+          initializer=initializer,
+          lookup_table=shared_embed_table,
+          tie_weight=FLAGS.tie_weight,
+          target_mapping=None,
+          hidden_mapping=None,
+          use_tpu=FLAGS.use_tpu)
 
     lm_loss = (tf.reduce_sum(lm_loss * dec_tgt_mask) /
                tf.reduce_sum(dec_tgt_mask))

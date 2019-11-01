@@ -81,8 +81,12 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   ##### Sample positions for different operations
   # (1) Sample deletion positions
-  del_rand = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
-  del_mask = tf.logical_and(del_rand < FLAGS.del_ratio, non_eos_mask)
+  del_num = int(math.ceil(seq_len * FLAGS.del_ratio))
+  del_uniform = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
+  _, del_idx = tf.math.top_k(del_uniform, k=del_num)
+  del_mask = tf.logical_and(
+      tf.reduce_sum(tf.one_hot(del_idx, seq_len, dtype=tf_int), 0) > 0,
+      non_eos_mask)
   non_del_mask = tf.logical_not(del_mask)
 
   # (2) Sample insertion positions given deletion
@@ -237,6 +241,17 @@ def create_dae_features(example, seq_len, use_bfloat16):
   edit_label = tf.cast(dec_ins_mask, tf_int) * FLAGS.ins_label
   edit_label += tf.cast(dec_rep_mask, tf_int) * FLAGS.rep_label
   edit_label += tf.cast(dec_del_mask, tf_int) * FLAGS.del_label
+  edit_mask = tf.logical_or(
+      tf.logical_or(dec_ins_mask, dec_rep_mask),
+      dec_del_mask)
+  edit_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), edit_mask)
+  num_mask = ins_num + rep_num + del_num
+  actual_num_mask = tf.shape(indices)[0]
+  map_pad_len = num_mask - actual_num_mask
+  dec_mask_map = tf.one_hot(edit_idx, FLAGS.dec_len, dtype=tf.float32)
+  map_padding = tf.zeros([map_pad_len, FLAGS.dec_len], dtype=dec_mask_map.dtype)
+  dec_mask_map = tf.concat([dec_mask_map, map_padding], axis=0)
+  dec_mask_map = tf.reshape(dec_mask_map, [num_mask, FLAGS.dec_len])
 
   ##### Put everything into the example
   example["gen_inp"] = enc_seq
@@ -252,6 +267,7 @@ def create_dae_features(example, seq_len, use_bfloat16):
   example["dec_type"] = dec_type
   example["dec_mask"] = dec_mask
   example["edit_label"] = edit_label
+  example["dec_mask_map"] = dec_mask_map
 
   ##### type cast for example
   type_cast(example, use_bfloat16)
