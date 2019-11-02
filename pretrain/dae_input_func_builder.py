@@ -45,6 +45,7 @@ flags.DEFINE_integer("rep_label", default=3,
 
 
 def get_type_id(tgt_len, tgt_idx, type_val):
+  """Deal with type id for insertion."""
   tgt_idx_left_shift = tgt_idx[:-1]
   type_val_right_shift = type_val[1:]
   new_type_id_shift = tf.scatter_nd(
@@ -239,7 +240,8 @@ def create_dae_features(example, seq_len, use_bfloat16):
   edit_label = tf.cast(dec_ins_mask, tf_int) * FLAGS.ins_label
   edit_label += tf.cast(dec_rep_mask, tf_int) * FLAGS.rep_label
   edit_label += tf.cast(dec_del_mask, tf_int) * FLAGS.del_label
-  # edit type below don't include insert
+
+  # Edit type below does not include insert
   edit_mask = tf.logical_or(dec_rep_mask, dec_del_mask)
   edit_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), edit_mask)
   num_mask = ins_num + rep_num + del_num
@@ -252,14 +254,16 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   dec_mask_val = tf.boolean_mask(dec_seq, edit_mask)
   dec_mask_idx = tf.range(actual_num_mask)
-  dec_mask_tgt = tf.tensor_scatter_nd_update(
+  dec_masked_tgt = tf.tensor_scatter_nd_update(
       tf.constant(FLAGS.pad_id, shape=[num_mask], dtype=tf_int),
       indices=dec_mask_idx[:, None],
       updates=dec_mask_val)
   dec_tgt_mask = tf.concat(
-    [tf.ones([actual_num_mask], dtype=tf_int), 
-     tf.zeros([map_pad_len], dtype=tf_int)],
-    axis=0)
+      [tf.ones([actual_num_mask], dtype=tf_int),
+       tf.zeros([map_pad_len], dtype=tf_int)],
+      axis=0)
+  dec_tgt_mask.set_shape([num_mask])
+
   ##### Put everything into the example
   example["gen_inp"] = enc_seq
   example["gen_tgt"] = gen_tgt
@@ -275,7 +279,7 @@ def create_dae_features(example, seq_len, use_bfloat16):
   example["dec_mask"] = dec_mask
   example["edit_label"] = edit_label
   example["dec_mask_map"] = dec_mask_map
-  example["dec_mask_tgt"] = dec_mask_tgt
+  example["dec_masked_tgt"] = dec_masked_tgt
   example["dec_lm_tgt_mask"] = dec_tgt_mask
 
   ##### type cast for example
@@ -370,15 +374,15 @@ def parse_record(dataset,
 
 
 def sent_dae_dataset(params,
-                      file_names,
-                      num_hosts,
-                      num_core_per_host,
-                      seq_len,
-                      is_training,
-                      use_bfloat16=False,
-                      num_threads=64,
-                      record_shuffle_size=4096,
-                      sequence_shuffle_size=2048):
+                     file_names,
+                     num_hosts,
+                     num_core_per_host,
+                     seq_len,
+                     is_training,
+                     use_bfloat16=False,
+                     num_threads=64,
+                     record_shuffle_size=4096,
+                     sequence_shuffle_size=2048):
   """Get sentence level dae dataset."""
   bsz_per_core = params["batch_size"]
   if num_hosts > 1:
@@ -421,15 +425,15 @@ def sent_dae_dataset(params,
 
 
 def semidoc_dae_dataset(params,
-                         file_names,
-                         num_hosts,
-                         num_core_per_host,
-                         seq_len,
-                         is_training,
-                         use_bfloat16=False,
-                         num_threads=64,
-                         record_shuffle_size=256,
-                         sequence_shuffle_size=2048):
+                        file_names,
+                        num_hosts,
+                        num_core_per_host,
+                        seq_len,
+                        is_training,
+                        use_bfloat16=False,
+                        num_threads=64,
+                        record_shuffle_size=256,
+                        sequence_shuffle_size=2048):
   # pylint: disable=g-doc-args
   """Get semi-doc level dae dataset.
 

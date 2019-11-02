@@ -383,7 +383,11 @@ def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
     hidden = tf.einsum("bld,bml->bmd", hidden, hidden_mapping)
 
   if target_mapping is not None:
-    target = tf.einsum("bl,bml->bm", target, target_mapping)
+    target = tf.cast(
+        tf.einsum("bl,bml->bm",
+                  tf.cast(target, tf.float32),
+                  tf.cast(target_mapping, tf.float32)),
+        target.dtype)
 
   # Apply one more non-linear transformation before the output layer.
   # This matrix is not used after pre-training.

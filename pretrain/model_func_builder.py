@@ -448,7 +448,7 @@ def dae_loss(features, labels, mems, n_token, is_training):
   dec_type = features["dec_type"]
   edit_label = features["edit_label"]
   dec_mask_map = features["dec_mask_map"]
-  dec_mask_tgt = features["dec_mask_tgt"]
+  dec_masked_tgt = features["dec_masked_tgt"]
   dec_lm_tgt_mask = features["dec_lm_tgt_mask"]
 
   #### Shared input embedding (for generator)
@@ -566,7 +566,7 @@ def dae_loss(features, labels, mems, n_token, is_training):
     if FLAGS.mask_edited_only:
       lm_loss, _ = model.lm_loss(
           hidden=dec_output,
-          target=dec_mask_tgt,
+          target=dec_masked_tgt,
           n_token=n_token,
           d_model=FLAGS.d_model,
           initializer=initializer,
@@ -579,7 +579,7 @@ def dae_loss(features, labels, mems, n_token, is_training):
         lm_loss = tf.cast(lm_loss, tf.float32)
       dec_lm_tgt_mask = tf.cast(dec_lm_tgt_mask, lm_loss.dtype)
       lm_loss = (tf.reduce_sum(lm_loss * dec_lm_tgt_mask) /
-                  tf.reduce_sum(dec_lm_tgt_mask))      
+                 tf.reduce_sum(dec_lm_tgt_mask))
     else:
       lm_loss, _ = model.lm_loss(
           hidden=dec_output,
@@ -593,7 +593,7 @@ def dae_loss(features, labels, mems, n_token, is_training):
           hidden_mapping=None,
           use_tpu=FLAGS.use_tpu)
       lm_loss = (tf.reduce_sum(lm_loss * dec_tgt_mask) /
-               tf.reduce_sum(dec_tgt_mask))
+                 tf.reduce_sum(dec_tgt_mask))
 
     if FLAGS.lm_weight > 0:
       # monitor
