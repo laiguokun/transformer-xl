@@ -231,28 +231,35 @@ def create_dae_features(example, seq_len, use_bfloat16):
   dec_rep_mask = tf.scatter_nd(
       shape=[FLAGS.dec_len],
       indices=dec_idx[:, None],
-      updates=tf.boolean_mask(rep_mask, dec_valid_mask)
-  )
+      updates=tf.boolean_mask(rep_mask, dec_valid_mask))
   dec_del_mask = tf.scatter_nd(
       shape=[FLAGS.dec_len],
       indices=dec_idx[:, None],
-      updates=tf.boolean_mask(del_mask, dec_valid_mask)
-  )
+      updates=tf.boolean_mask(del_mask, dec_valid_mask))
   edit_label = tf.cast(dec_ins_mask, tf_int) * FLAGS.ins_label
   edit_label += tf.cast(dec_rep_mask, tf_int) * FLAGS.rep_label
   edit_label += tf.cast(dec_del_mask, tf_int) * FLAGS.del_label
-  edit_mask = tf.logical_or(
-      tf.logical_or(dec_ins_mask, dec_rep_mask),
-      dec_del_mask)
+  # edit type below don't include insert
+  edit_mask = tf.logical_or(dec_rep_mask, dec_del_mask)
   edit_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), edit_mask)
   num_mask = ins_num + rep_num + del_num
-  actual_num_mask = tf.shape(indices)[0]
+  actual_num_mask = tf.shape(edit_idx)[0]
   map_pad_len = num_mask - actual_num_mask
   dec_mask_map = tf.one_hot(edit_idx, FLAGS.dec_len, dtype=tf.float32)
   map_padding = tf.zeros([map_pad_len, FLAGS.dec_len], dtype=dec_mask_map.dtype)
   dec_mask_map = tf.concat([dec_mask_map, map_padding], axis=0)
   dec_mask_map = tf.reshape(dec_mask_map, [num_mask, FLAGS.dec_len])
 
+  dec_mask_val = tf.boolean_mask(dec_seq, edit_mask)
+  dec_mask_idx = tf.range(actual_num_mask)
+  dec_mask_tgt = tf.tensor_scatter_nd_update(
+      tf.constant(FLAGS.pad_id, shape=[num_mask], dtype=tf_int),
+      indices=dec_mask_idx[:, None],
+      updates=dec_mask_val)
+  dec_tgt_mask = tf.concat(
+    [tf.ones([actual_num_mask], dtype=tf_int), 
+     tf.zeros([map_pad_len], dtype=tf_int)],
+    axis=0)
   ##### Put everything into the example
   example["gen_inp"] = enc_seq
   example["gen_tgt"] = gen_tgt
@@ -268,6 +275,8 @@ def create_dae_features(example, seq_len, use_bfloat16):
   example["dec_mask"] = dec_mask
   example["edit_label"] = edit_label
   example["dec_mask_map"] = dec_mask_map
+  example["dec_mask_tgt"] = dec_mask_tgt
+  example["dec_lm_tgt_mask"] = dec_tgt_mask
 
   ##### type cast for example
   type_cast(example, use_bfloat16)
