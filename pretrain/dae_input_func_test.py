@@ -73,12 +73,12 @@ def main(unused_argv):
       for k, v in example_np.items():
         if v.ndim == 2:
           for i in range(v.shape[0]):
-            if k in ["gen_inp", "gen_tgt", "dec_inp", "dec_tgt", "inputs", "dec_mask_tgt"]:
+            if k in ["gen_inp", "gen_tgt", "dec_inp", "dec_tgt", "inputs", "dec_masked_tgt"]:
               print(k, v[i].shape, tokenizer.convert_ids_to_text(v[i].tolist()))
             else:
               print(k, v[i].shape, " ".join([str(j) for j in v[i].tolist()]))
         elif v.ndim == 1:
-          if k in ["gen_inp", "gen_tgt", "dec_inp", "dec_tgt", "inputs", "dec_mask_tgt"]:
+          if k in ["gen_inp", "gen_tgt", "dec_inp", "dec_tgt", "inputs", "dec_masked_tgt"]:
             print(k, v.shape, tokenizer.convert_ids_to_text(v.tolist()))
           else:
             print(k, v.shape, " ".join([str(j) for j in v.tolist()]))

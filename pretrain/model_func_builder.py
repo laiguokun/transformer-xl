@@ -510,8 +510,8 @@ def dae_loss(features, labels, mems, n_token, is_training):
   enc_inp = tf.where(tf.equal(gen_inp, FLAGS.mask_id), samples, gen_inp)
 
   # get the mask for generated same token as the target
-  same_mask = tf.logical_not(tf.equal(gen_tokens, gen_tgt))
-  same_mask = tf.cast(same_mask, tf.float32)
+  same_mask = tf.equal(gen_tokens, gen_tgt)
+  same_mask = tf.cast(same_mask, tf.float32) * gen_tgt_mask
   dec_same_mask = tf.einsum("bi,bil->bl", same_mask, rep_enc2dec)
   dec_same_mask = tf.cast(dec_same_mask, tf.bool)
   edit_label = tf.where(dec_same_mask, 
@@ -588,6 +588,9 @@ def dae_loss(features, labels, mems, n_token, is_training):
       monitor_dict["del_accu"] = del_accu
       monitor_dict["ins_accu"] = ins_accu
       monitor_dict["rep_accu"] = rep_accu
+
+      same_prec = tf.reduce_sum(same_mask) / tf.reduce_sum(gen_tgt_mask)
+      monitor_dict["same_perc"] = same_prec
       # accumulate total loss
       total_loss += FLAGS.edit_weight * edit_loss
 
