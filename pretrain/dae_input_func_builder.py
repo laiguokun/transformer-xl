@@ -161,7 +161,8 @@ def create_dae_features(example, seq_len, use_bfloat16):
   # gen_mask_map: extract `num_mask` sub-seq from `enc_len` full-seq
   indices = tf.range(FLAGS.enc_len, dtype=tf_int)
   indices = tf.boolean_mask(indices, is_masked)
-  num_mask = rep_num + ins_num
+  enc_num_mask = rep_num + ins_num
+  num_mask = enc_num_mask
   actual_num_mask = tf.shape(indices)[0]
   map_pad_len = num_mask - actual_num_mask
   gen_mask_map = tf.one_hot(indices, FLAGS.enc_len, dtype=tf.float32)
@@ -244,7 +245,8 @@ def create_dae_features(example, seq_len, use_bfloat16):
   # Edit type below does not include insert
   edit_mask = tf.logical_or(dec_rep_mask, dec_del_mask)
   edit_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), edit_mask)
-  num_mask = ins_num + rep_num + del_num
+  dec_num_mask = ins_num + rep_num + del_num
+  num_mask = dec_num_mask
   actual_num_mask = tf.shape(edit_idx)[0]
   map_pad_len = num_mask - actual_num_mask
   dec_mask_map = tf.one_hot(edit_idx, FLAGS.dec_len, dtype=tf.float32)
@@ -264,6 +266,25 @@ def create_dae_features(example, seq_len, use_bfloat16):
       axis=0)
   dec_tgt_mask.set_shape([num_mask])
 
+  # conver the rep idx from encoder part to decoder. Using to remove the generated
+  # result equals to original
+  enc_rep_map_idx = tf.boolean_mask(tf.range(enc_num_mask), gen_tgt_mask)
+  dec_rep_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_rep_mask)
+  dec_rep_idx = tf.one_hot(dec_rep_idx, FLAGS.dec_len)
+  rep_enc2dec = tf.scatter_nd(
+      shape=[enc_num_mask, FLAGS.dec_len],
+      indices=enc_rep_map_idx[:, None],
+      updates=dec_rep_idx)
+  rep_enc2dec = tf.cast(rep_enc2dec, tf.float32)
+  is_rep = tf.boolean_mask(dec_rep_mask, edit_mask)
+  dec_rep_map_idx = tf.boolean_mask(tf.range(dec_num_mask), is_rep)
+  dec_rep_map_idx = tf.one_hot(dec_rep_map_idx, dec_num_mask)
+  rep_enc2dec_map = tf.scatter_nd(
+      shape=[enc_num_mask, dec_num_mask],
+      indices=enc_rep_map_idx[:, None],
+      updates=dec_rep_map_idx)
+  rep_enc2dec_map = tf.cast(rep_enc2dec_map, tf.float32)
+
   ##### Put everything into the example
   example["gen_inp"] = enc_seq
   example["gen_tgt"] = gen_tgt
@@ -281,7 +302,9 @@ def create_dae_features(example, seq_len, use_bfloat16):
   example["dec_mask_map"] = dec_mask_map
   example["dec_masked_tgt"] = dec_masked_tgt
   example["dec_lm_tgt_mask"] = dec_tgt_mask
-
+  example["rep_enc2dec"] = rep_enc2dec
+  example["rep_enc2dec_map"] = rep_enc2dec_map
+  #example["test"] = test
   ##### type cast for example
   type_cast(example, use_bfloat16)
   for k, v in example.items():
