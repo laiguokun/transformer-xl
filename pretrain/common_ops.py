@@ -340,7 +340,7 @@ def multihead_attn(q, k, v, attn_mask, d_model, n_head, d_head, dropout,
 
     # post processing
     output, post_dict = post_attention(
-        v, attn_vec, d_model, n_head, d_head, dropout,
+        q, attn_vec, d_model, n_head, d_head, dropout,
         is_training, kernel_initializer, residual)
 
     # things to monitor
