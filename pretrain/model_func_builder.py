@@ -773,7 +773,7 @@ def joint_loss(features, labels, n_token, is_training):
 
 
 @bf16_decorator
-def encded_loss(features, labels, n_token, is_training):
+def encdec_loss(features, labels, n_token, is_training):
   """Encoder-decoder only seq2seq."""
   del labels
 
@@ -871,7 +871,7 @@ def encded_loss(features, labels, n_token, is_training):
         input_mask=None,
         perm_mask=tgt_to_tgt,
         context=src_output,
-        context_mask=tgt_to_src)
+        context_mask=tgt_to_src[:, None, :, :])
 
     lm_loss, nll_loss = model.lm_loss(
         hidden=tgt_output,
