@@ -229,7 +229,7 @@ def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
 def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
                 dropout, dropatt, dropact, initializer, is_training,
                 context=None, context_mask=None, input_mask=None,
-                perm_mask=None, ff_activation="gelu", causal=False,
+                perm_mask=None, ff_activation="relu", causal=False,
                 return_all_hidden=False, scope="transformer"):
   """Transformer model."""
 
@@ -242,6 +242,8 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
   tf.logging.info("  - inputs %s", inputs)
   tf.logging.info("  - input_mask %s", input_mask)
   tf.logging.info("  - perm_mask %s", perm_mask)
+  tf.logging.info("  - context %s", context)
+  tf.logging.info("  - context_mask %s", context_mask)
   tf.logging.info("Hparam related:")
   tf.logging.info("  - initializer %s", initializer)
   tf.logging.info("  - ff_activation %s", ff_activation)

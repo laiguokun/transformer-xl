@@ -450,8 +450,8 @@ def dae_loss(features, labels, mems, n_token, is_training):
   dec_mask_map = features["dec_mask_map"]
   dec_masked_tgt = features["dec_masked_tgt"]
   dec_lm_tgt_mask = features["dec_lm_tgt_mask"]
-  rep_enc2dec = features["rep_enc2dec"]
-  rep_enc2dec_map = features["rep_enc2dec_map"]
+  rep_enc2dec_full = features["rep_enc2dec_full"]
+  rep_enc2dec_part = features["rep_enc2dec_part"]
 
   #### Shared input embedding (for generator)
   with tf.variable_scope("input", reuse=tf.AUTO_REUSE):
@@ -509,17 +509,27 @@ def dae_loss(features, labels, mems, n_token, is_training):
   samples = tf.cast(samples, tf.int32)
   enc_inp = tf.where(tf.equal(gen_inp, FLAGS.mask_id), samples, gen_inp)
 
-  # get the mask for generated same token as the target
+  #### get the mask for generated same token as the target
   same_mask = tf.equal(gen_tokens, gen_tgt)
-  same_mask = tf.cast(same_mask, tf.float32) * gen_tgt_mask
-  dec_same_mask = tf.einsum("bi,bil->bl", same_mask, rep_enc2dec)
-  dec_same_mask = tf.cast(dec_same_mask, tf.bool)
-  edit_label = tf.where(dec_same_mask, 
-                        tf.zeros(tf.shape(dec_same_mask), dtype=tf.int32), 
-                        edit_label)
-  same_mask_for_map = tf.einsum("bi,bij->bj", same_mask, rep_enc2dec_map)
-  same_mask_for_map = 1 - tf.cast(same_mask_for_map, tf.int32)
-  dec_lm_tgt_mask = dec_lm_tgt_mask * same_mask_for_map
+  same_mask = (tf.cast(same_mask, rep_enc2dec_full.dtype) *
+               tf.cast(gen_tgt_mask, rep_enc2dec_full.dtype))
+
+  # monitor how many generated tokens are the same as the real ones
+  same_prec = (tf.reduce_sum(tf.cast(same_mask, gen_tgt_mask.dtype))
+               / tf.reduce_sum(gen_tgt_mask))
+  monitor_dict["same_percent"] = same_prec
+
+  # If same, change the edit_label to original (0)
+  dec_same_mask_full = tf.einsum("bi,bil->bl", same_mask, rep_enc2dec_full)
+  edit_label = tf.where(
+      tf.cast(dec_same_mask_full, tf.bool),
+      tf.zeros(tf.shape(dec_same_mask_full), dtype=edit_label.dtype),
+      edit_label)
+
+  # If same, exclude from LM loss
+  dec_same_mask_part = tf.einsum("bi,bij->bj", same_mask, rep_enc2dec_part)
+  dec_diff_mask_part = 1.0 - tf.cast(dec_same_mask_part, dec_lm_tgt_mask.dtype)
+  dec_lm_tgt_mask = dec_lm_tgt_mask * dec_diff_mask_part
 
   #### Shared input embedding (for encoder)
   with tf.variable_scope("input", reuse=tf.AUTO_REUSE):
@@ -572,25 +582,23 @@ def dae_loss(features, labels, mems, n_token, is_training):
     if FLAGS.edit_weight > 0:
       # monitor
       monitor_dict["edit_loss"] = edit_loss
-      monitor_dict["edit_accu"] = edit_accu
-      
+      monitor_dict["accu_edit"] = edit_accu
+
       def get_class_acc(label_id):
         mask = tf.ones(tf.shape(edit_label), dtype=edit_label.dtype) * label_id
         mask = tf.equal(edit_label, mask)
         mask = tf.cast(mask, dtype=dec_tgt_mask.dtype) * dec_tgt_mask
         accu = tf.reduce_sum(edit_corr * mask) / tf.reduce_sum(mask)
         return accu
-      orig_accu = get_class_acc(0)
-      del_accu = get_class_acc(FLAGS.del_label) 
-      ins_accu = get_class_acc(FLAGS.ins_label)
-      rep_accu = get_class_acc(FLAGS.rep_label)
-      monitor_dict["orig_accu"] = orig_accu
-      monitor_dict["del_accu"] = del_accu
-      monitor_dict["ins_accu"] = ins_accu
-      monitor_dict["rep_accu"] = rep_accu
 
-      same_prec = tf.reduce_sum(same_mask) / tf.reduce_sum(gen_tgt_mask)
-      monitor_dict["same_perc"] = same_prec
+      monitor_dict["accu_orig"] = get_class_acc(0)
+      if FLAGS.del_ratio > 0:
+        monitor_dict["accu_del"] = get_class_acc(FLAGS.del_label)
+      if FLAGS.ins_ratio > 0:
+        monitor_dict["accu_ins"] = get_class_acc(FLAGS.ins_label)
+      if FLAGS.rep_ratio > 0:
+        monitor_dict["accu_rep"] = get_class_acc(FLAGS.rep_label)
+
       # accumulate total loss
       total_loss += FLAGS.edit_weight * edit_loss
 

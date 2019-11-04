@@ -82,6 +82,9 @@ def main(unused_argv):
             print(k, v.shape, tokenizer.convert_ids_to_text(v.tolist()))
           else:
             print(k, v.shape, " ".join([str(j) for j in v.tolist()]))
+        elif v.ndim > 3:
+          for i in range(v.shape[0]):
+            print(k, v.shape, v[i])
 
 
 if __name__ == "__main__":

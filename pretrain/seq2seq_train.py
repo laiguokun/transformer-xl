@@ -112,6 +112,8 @@ flags.DEFINE_integer("max_length", default=0,
                      help="Max length for source and target.")
 
 ##### Loss related
+flags.DEFINE_string("seq2seq_type", default="encdec",
+                    help="Type of seq2seq model to use.")
 flags.DEFINE_bool("tie_weight", default=True,
                   help="Tie embeddings.")
 flags.DEFINE_bool("attn_to_mask", default=True,
@@ -142,14 +144,20 @@ def metric_fn(loss):
 
 
 def get_model_fn(n_token):
-  """doc."""
+  """Config the model function for TPUEstimator."""
   def model_fn(features, labels, mode, params):
-    """doc."""
+    """Actual model function."""
     #### Training or Evaluation
     is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
     #### Get loss from inputs
-    total_loss, monitor_dict = model_func_builder.joint_loss(
+    if FLAGS.seq2seq_type == "dec_only":
+      seq2seq_loss = model_func_builder.joint_loss
+    elif FLAGS.seq2seq_type == "encdec":
+      seq2seq_loss = model_func_builder.encdec_loss
+    else:
+      raise NotImplementedError
+    total_loss, monitor_dict = seq2seq_loss(
         features, labels, n_token, is_training)
 
     #### Check model parameters
@@ -178,15 +186,11 @@ def get_model_fn(n_token):
 
       return eval_spec
 
-    #### Get the train op
-    train_op, optim_dict = optimization.get_train_op(total_loss)
-    monitor_dict.update(optim_dict)
-
     #### Customized initial checkpoint
-    tvars = tf.global_variables()
+    tvars = tf.trainable_variables()
     initialized_variable_names = {}
     scaffold_fn = None
-    if FLAGS.init_checkpoint is not None:
+    if FLAGS.init_checkpoint:
       if FLAGS.init_checkpoint.endswith("latest"):
         ckpt_dir = os.path.dirname(FLAGS.init_checkpoint)
         init_checkpoint = tf.train.latest_checkpoint(ckpt_dir)
@@ -214,6 +218,10 @@ def get_model_fn(n_token):
           init_string = ", *INIT_FROM_CKPT*"
         tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
                         init_string)
+
+    #### Get the train op
+    train_op, optim_dict = optimization.get_train_op(total_loss)
+    monitor_dict.update(optim_dict)
 
     #### Creating host calls
     host_call = model_utils.construct_scalar_host_call(
@@ -308,7 +316,7 @@ def main(unused_argv):
 
   # warm start
   warm_start_from = None
-  if FLAGS.warm_start_path is not None:
+  if FLAGS.warm_start_path:
     warm_start_from = tf.estimator.WarmStartSettings(
         ckpt_to_initialize_from=FLAGS.warm_start_path)
 

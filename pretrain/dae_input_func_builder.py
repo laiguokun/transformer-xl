@@ -121,7 +121,9 @@ def create_dae_features(example, seq_len, use_bfloat16):
   ######### construct features
   ori_idx = tf.range(seq_len, dtype=tf_int)
 
-  ##### encoder features
+  ############################
+  ##### Encoder features #####
+  ############################
   # map `ori_idx` to `enc_idx`
   enc_shift = ins_cnt - tf.cast(del_mask, tf_int)
   enc_shift = tf.cumsum(enc_shift)
@@ -155,40 +157,45 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   enc_type = get_type_id(FLAGS.enc_len, enc_idx, enc_type)
 
-  ##### generator features
+  ##############################
+  ##### Generator features #####
+  ##############################
   is_masked = tf.equal(enc_seq, FLAGS.mask_id)
 
-  # gen_mask_map: extract `num_mask` sub-seq from `enc_len` full-seq
-  indices = tf.range(FLAGS.enc_len, dtype=tf_int)
-  indices = tf.boolean_mask(indices, is_masked)
+  # gen_mask_map: permutation matrix used to extract `enc_num_mask` subset
+  # from the `enc_len` full sequence
+  enc_masked_idx = tf.boolean_mask(tf.range(FLAGS.enc_len, dtype=tf_int),
+                                   is_masked)
   enc_num_mask = rep_num + ins_num
-  num_mask = enc_num_mask
-  actual_num_mask = tf.shape(indices)[0]
-  map_pad_len = num_mask - actual_num_mask
-  gen_mask_map = tf.one_hot(indices, FLAGS.enc_len, dtype=tf.float32)
+  actual_enc_num_mask = tf.shape(enc_masked_idx)[0]
+  map_pad_len = enc_num_mask - actual_enc_num_mask
+  gen_mask_map = tf.one_hot(enc_masked_idx, FLAGS.enc_len, dtype=tf.float32)
   map_padding = tf.zeros([map_pad_len, FLAGS.enc_len], dtype=gen_mask_map.dtype)
   gen_mask_map = tf.concat([gen_mask_map, map_padding], axis=0)
-  gen_mask_map = tf.reshape(gen_mask_map, [num_mask, FLAGS.enc_len])
+  gen_mask_map = tf.reshape(gen_mask_map, [enc_num_mask, FLAGS.enc_len])
 
-  # gen_tgt_mask: only `rep_num` 1s in the sequence of length `num_mask`
+  # gen_tgt_mask: only `rep_num` 1s in the sequence of length `enc_num_mask`
   no_ins_inp = tf.scatter_nd(shape=[FLAGS.enc_len],
                              indices=enc_idx[:, None],
                              updates=enc_val)
   is_rep = tf.equal(no_ins_inp, FLAGS.mask_id)
   gen_tgt_mask = tf.boolean_mask(is_rep, is_masked)
-  gen_tgt_mask.set_shape([num_mask])
+  gen_tgt_mask.set_shape([enc_num_mask])
 
   # gen_tgt: scatter `rep_num` replaced ids to the correct positions in the
-  # sequence of total length `num_mask` (others correspond to insertions)
+  # sequence of total length `enc_num_mask` (others correspond to insertions)
   enc_valid_rep_mask = tf.logical_and(rep_mask, enc_shift_idx < FLAGS.enc_len)
   gen_tgt_val = tf.boolean_mask(inputs, enc_valid_rep_mask)
-  gen_tgt_idx = tf.boolean_mask(tf.range(num_mask, dtype=tf_int), gen_tgt_mask)
+  gen_tgt_idx = tf.boolean_mask(tf.range(enc_num_mask, dtype=tf_int),
+                                gen_tgt_mask)
   gen_tgt = tf.tensor_scatter_nd_update(
-      tf.constant(FLAGS.pad_id, shape=[num_mask], dtype=tf_int),
+      tf.constant(FLAGS.pad_id, shape=[enc_num_mask], dtype=tf_int),
       indices=gen_tgt_idx[:, None],
       updates=gen_tgt_val)
 
-  ##### decoder features
+  ############################
+  ##### Decoder features #####
+  ############################
   # We do not delete any token for decoder: the shift only comes from insertion
   dec_shift = tf.cumsum(ins_cnt)
   dec_idx = ori_idx + dec_shift
@@ -242,48 +249,57 @@ def create_dae_features(example, seq_len, use_bfloat16):
   edit_label += tf.cast(dec_rep_mask, tf_int) * FLAGS.rep_label
   edit_label += tf.cast(dec_del_mask, tf_int) * FLAGS.del_label
 
-  # Edit type below does not include insert
-  edit_mask = tf.logical_or(dec_rep_mask, dec_del_mask)
-  edit_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), edit_mask)
-  dec_num_mask = ins_num + rep_num + del_num
-  num_mask = dec_num_mask
-  actual_num_mask = tf.shape(edit_idx)[0]
-  map_pad_len = num_mask - actual_num_mask
-  dec_mask_map = tf.one_hot(edit_idx, FLAGS.dec_len, dtype=tf.float32)
+  # NOTE: only use delete and replace positions for decoder LM loss (no insert)
+  # `dec_mask_map`: permutation matrix used to extract `dec_num_mask` subset
+  #                 from the `dec_len` full sequence
+  dec_edit_mask = tf.logical_or(dec_rep_mask, dec_del_mask)
+  dec_edit_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_edit_mask)
+  dec_num_mask = rep_num + del_num
+  dec_actual_num_mask = tf.shape(dec_edit_idx)[0]
+  map_pad_len = dec_num_mask - dec_actual_num_mask
+  dec_mask_map = tf.one_hot(dec_edit_idx, FLAGS.dec_len, dtype=tf.float32)
   map_padding = tf.zeros([map_pad_len, FLAGS.dec_len], dtype=dec_mask_map.dtype)
   dec_mask_map = tf.concat([dec_mask_map, map_padding], axis=0)
-  dec_mask_map = tf.reshape(dec_mask_map, [num_mask, FLAGS.dec_len])
+  dec_mask_map = tf.reshape(dec_mask_map, [dec_num_mask, FLAGS.dec_len])
 
-  dec_mask_val = tf.boolean_mask(dec_seq, edit_mask)
-  dec_mask_idx = tf.range(actual_num_mask)
+  # `dec_tgt_mask`: only first `dec_actual_num_mask` elements are 1s in the
+  #                 `dec_tgt_mask` of total length `dec_num_mask`.
+  dec_tgt_mask = tf.concat(
+      [tf.ones([dec_actual_num_mask], dtype=tf.float32),
+       tf.zeros([map_pad_len], dtype=tf.float32)],
+      axis=0)
+  dec_tgt_mask.set_shape([dec_num_mask])
+
+  # dec_masked_tgt: the subset of target tokens used to LM loss
+  dec_mask_val = tf.boolean_mask(dec_seq, dec_edit_mask)
+  dec_mask_idx = tf.range(dec_actual_num_mask)
   dec_masked_tgt = tf.tensor_scatter_nd_update(
-      tf.constant(FLAGS.pad_id, shape=[num_mask], dtype=tf_int),
+      tf.constant(FLAGS.pad_id, shape=[dec_num_mask], dtype=tf_int),
       indices=dec_mask_idx[:, None],
       updates=dec_mask_val)
-  dec_tgt_mask = tf.concat(
-      [tf.ones([actual_num_mask], dtype=tf_int),
-       tf.zeros([map_pad_len], dtype=tf_int)],
-      axis=0)
-  dec_tgt_mask.set_shape([num_mask])
 
-  # conver the rep idx from encoder part to decoder. Using to remove the generated
-  # result equals to original
+  # Convert the rep idx from encoder part to decoder. Used to remove the loss
+  # of generated tokens that are equal to original tokens
+
+  # `rep_enc2dec_full`: permutation matrix [enc_num_mask, dec_len]
   enc_rep_map_idx = tf.boolean_mask(tf.range(enc_num_mask), gen_tgt_mask)
   dec_rep_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_rep_mask)
   dec_rep_idx = tf.one_hot(dec_rep_idx, FLAGS.dec_len)
-  rep_enc2dec = tf.scatter_nd(
+  rep_enc2dec_full = tf.scatter_nd(
       shape=[enc_num_mask, FLAGS.dec_len],
       indices=enc_rep_map_idx[:, None],
       updates=dec_rep_idx)
-  rep_enc2dec = tf.cast(rep_enc2dec, tf.float32)
-  is_rep = tf.boolean_mask(dec_rep_mask, edit_mask)
+  rep_enc2dec_full = tf.cast(rep_enc2dec_full, tf.float32)
+
+  # `rep_enc2dec_part`: permutation matrix [enc_num_mask, dec_num_mask]
+  is_rep = tf.boolean_mask(dec_rep_mask, dec_edit_mask)
   dec_rep_map_idx = tf.boolean_mask(tf.range(dec_num_mask), is_rep)
   dec_rep_map_idx = tf.one_hot(dec_rep_map_idx, dec_num_mask)
-  rep_enc2dec_map = tf.scatter_nd(
+  rep_enc2dec_part = tf.scatter_nd(
       shape=[enc_num_mask, dec_num_mask],
       indices=enc_rep_map_idx[:, None],
       updates=dec_rep_map_idx)
-  rep_enc2dec_map = tf.cast(rep_enc2dec_map, tf.float32)
+  rep_enc2dec_part = tf.cast(rep_enc2dec_part, tf.float32)
 
   ##### Put everything into the example
   example["gen_inp"] = enc_seq
@@ -302,9 +318,9 @@ def create_dae_features(example, seq_len, use_bfloat16):
   example["dec_mask_map"] = dec_mask_map
   example["dec_masked_tgt"] = dec_masked_tgt
   example["dec_lm_tgt_mask"] = dec_tgt_mask
-  example["rep_enc2dec"] = rep_enc2dec
-  example["rep_enc2dec_map"] = rep_enc2dec_map
-  #example["test"] = test
+  example["rep_enc2dec_full"] = rep_enc2dec_full
+  example["rep_enc2dec_part"] = rep_enc2dec_part
+
   ##### type cast for example
   type_cast(example, use_bfloat16)
   for k, v in example.items():
