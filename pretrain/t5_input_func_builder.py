@@ -75,11 +75,14 @@ def _token_span_mask(inputs, tgt_len, num_predict):
 
   probs /= np.sum(probs)
   logits = tf.constant(np.log(probs), dtype=tf.float32)
+
+  # +1 is denote that in decoder there will be a placeholder, in encoder we will
+  # remove the last one, this also prevent the adjacent span
   span_lens = tf.random.categorical(
       logits=logits[None],
       num_samples=num_predict,
       dtype=tf.int64,
-  )[0] + FLAGS.min_tok
+  )[0] + FLAGS.min_tok + 1
 
   # Sample the ratio [0.0, 1.0) of left context lengths
   span_lens_float = tf.cast(span_lens, tf.float32)
@@ -113,34 +116,55 @@ def _token_span_mask(inputs, tgt_len, num_predict):
 def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   """docs."""
   inputs = example["inputs"]
-  max_span_num = FLAGS.max_span_num
   ph_idx_0 = FLAGS.ph_id_0
   # sample mask
   is_masked, segment_ids, pos_seq = _token_span_mask(
-      inputs, seq_len, num_predict-max_span_num)
+      inputs, seq_len, num_predict)
+  
+  # because decoder has one place-holder, remove the last token in each span
+  masked_idx = tf.boolean_mask(tf.range(seq_len), is_masked)
+  is_beginning = tf.equal(tf.boolean_mask(pos_seq, is_masked), 0)
+  ending_idx_m = tf.boolean_mask(tf.range(num_predict), is_beginning)[1:] 
+  ending_idx_m = tf.concat(
+      [ending_idx_m, tf.ones(shape=[1], dtype=tf.int32) * tf.shape(masked_idx)[0]],
+      axis=0) - 1
+  ending_idx = tf.gather(masked_idx, ending_idx_m)
+  padding = tf.zeros(shape=[tf.shape(ending_idx)[0]])
+
+  is_masked = tf.tensor_scatter_nd_update(
+      is_masked,
+      indices=ending_idx[:, None],
+      updates=tf.cast(padding, dtype=is_masked.dtype))
+  segment_ids = tf.tensor_scatter_nd_update(
+      segment_ids,
+      indices=ending_idx[:, None],
+      updates=tf.cast(padding, dtype=segment_ids.dtype))
+  pos_seq = tf.tensor_scatter_nd_update(
+      pos_seq,
+      indices=ending_idx[:, None],
+      updates=tf.cast(padding, dtype=pos_seq.dtype))
+
   
   # encoder inp
-  non_masked = tf.logical_not(is_masked)
-  segment_num = tf.reduce_max(segment_ids)
   masked_idx = tf.boolean_mask(tf.range(seq_len), is_masked)
   is_beginning = tf.equal(tf.boolean_mask(pos_seq, is_masked), 0)
   beginning_idx = tf.boolean_mask(masked_idx, is_beginning)
+  non_masked = tf.logical_not(is_masked)
+  segment_num = tf.shape(beginning_idx)[0]
   enc_seq_mask = tf.tensor_scatter_nd_update(
       non_masked,
       indices=beginning_idx[:, None],
-      updates=tf.ones(shape=[segment_num], dtype=tf.bool)
-  )
+      updates=tf.ones(shape=[segment_num], dtype=tf.bool))
   enc_seq = tf.boolean_mask(inputs, enc_seq_mask)
   
   new_beginning_idx = tf.gather(
       tf.cumsum(tf.cast(enc_seq_mask, dtype=tf.int64), exclusive=True),
-      beginning_idx
-  )
+      beginning_idx)
+  ph_idx_val = tf.cast(tf.range(segment_num) + ph_idx_0, dtype=tf.int64)
   enc_seq = tf.tensor_scatter_nd_update(
       enc_seq, 
       indices=new_beginning_idx[:, None],
-      updates=tf.range(segment_num) + ph_idx_0
-  )
+      updates=ph_idx_val)
 
   pad_len = seq_len - tf.shape(enc_seq)[0]
   enc_seq = tf.concat(
@@ -150,8 +174,10 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   example["source"] = enc_seq
   example["source_segmentation"] = tf.cast(tf.not_equal(enc_seq, 0), dtype=tf.int64)
   example["source_position"] = tf.range(seq_len, dtype=tf.int64)
-
+  
   # decoder inp and out
+  # add one because we append a final place holder at the end
+  num_predict = num_predict + 1
   mask = tf.boolean_mask(tf.ones([seq_len], dtype=tf.int64), is_masked)
   mask = mask + tf.cast(is_beginning, mask.dtype)
   mask_idx = tf.cumsum(mask) - 1
@@ -159,31 +185,28 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   dec_seq = tf.scatter_nd(
       shape=[num_predict],
       indices=mask_idx[:, None],
-      updates=masked_tok
-  )
+      updates=masked_tok)
   ph_idx = tf.boolean_mask(mask_idx, is_beginning) - 1
   last_idx = mask_idx[-1] + 1
   ph_idx = tf.concat(
-      [ph_idx, tf.ones(shape=[1], dtype=tf.int64)*last_idx],
+      [ph_idx, tf.ones(shape=[1], dtype=tf.int64) * last_idx],
       axis=0)
+  ph_idx_val = tf.cast(tf.range(segment_num + 1) + ph_idx_0, dtype=tf.int64)
   dec_seq = tf.tensor_scatter_nd_update(
       dec_seq,
       indices=ph_idx[:, None],
-      updates=tf.range(segment_num + 1) + ph_idx_0
-  )
-  
-  #dec_seq = tf.concat(
-  #    [tf.constant(FLAGS.eos_id, shape=[1], dtype=tf.int64), dec_seq], 0)
+      updates=ph_idx_val)
   
   pad_len = num_predict - (last_idx + 1)
   target_seg = tf.concat(
-      [tf.ones(shape=[num_predict - pad_len], dtype=tf.int64),
+      [tf.ones(shape=[num_predict-pad_len], dtype=tf.int64),
        tf.zeros(shape=[pad_len], dtype=tf.int64)],
       axis=0
   )
   example["target"] = dec_seq
   example["target_segmentation"] = target_seg
   example["target_position"] = tf.range(num_predict, dtype=tf.int64)
+  
   # type cast for example
   type_cast(example, use_bfloat16)
 

@@ -25,7 +25,6 @@ flags.DEFINE_integer("mask_id", default=None, help="")
 flags.DEFINE_integer("ins_id", default=None, help="")
 
 flags.DEFINE_integer("ph_id_0", default=None, help="the smallest placehold id")
-flags.DEFINE_integer("max_span_num", default=10, help="the maximum span number")
 
 flags.DEFINE_integer("seg_id_a", default=0, help="segment id of segment A.")
 flags.DEFINE_integer("seg_id_b", default=1, help="segment id of segment B.")
