@@ -24,6 +24,9 @@ flags.DEFINE_integer("eop_id", default=None, help="")
 flags.DEFINE_integer("mask_id", default=None, help="")
 flags.DEFINE_integer("ins_id", default=None, help="")
 
+flags.DEFINE_integer("ph_id_0", default=None, help="the smallest placehold id")
+flags.DEFINE_integer("max_span_num", default=10, help="the maximum span number")
+
 flags.DEFINE_integer("seg_id_a", default=0, help="segment id of segment A.")
 flags.DEFINE_integer("seg_id_b", default=1, help="segment id of segment B.")
 flags.DEFINE_integer("seg_id_cls", default=0, help="segment id of cls.")
@@ -62,8 +65,9 @@ def setup_special_ids(tokenizer, symbols_mapping=None):
         tf.logging.warning("Skip %s: not found in tokenizer's vocab.", sym)
         continue
 
-      setattr(FLAGS, sym_id_str, sym_id)
-      tf.logging.info("Set %s to %d.", sym_id_str, sym_id)
+      if sym_id_str[:5] != "ph_id" or sym_id_str == "ph_id_0":
+        setattr(FLAGS, sym_id_str, sym_id)
+        tf.logging.info("Set %s to %d.", sym_id_str, sym_id)
 
     except KeyError:
       tf.logging.warning("Skip %s: not found in tokenizer's vocab.", sym)
