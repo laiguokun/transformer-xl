@@ -9,6 +9,7 @@ import os
 
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
+import numpy as np
 
 import tensorflow as tf
 
@@ -26,6 +27,96 @@ except ImportError as e:
 
 FLAGS = flags.FLAGS
 
+def _idx_pair_to_mask(
+    beg_indices, 
+    end_indices, 
+    inputs, 
+    tgt_len, 
+    num_predict,
+    del_rep_mask):
+  """Turn begin and end indices into actual mask."""
+  non_func_mask = tf.not_equal(inputs, FLAGS.eos_id)
+  all_indices = tf.where(
+      non_func_mask,
+      tf.range(tgt_len, dtype=tf.int64),
+      tf.constant(-1, shape=[tgt_len], dtype=tf.int64))
+  candidate_matrix = tf.cast(
+      tf.logical_and(
+          all_indices[None, :] >= beg_indices[:, None],
+          all_indices[None, :] < end_indices[:, None]),
+      tf.float32)
+  cumsum_matrix = tf.reshape(
+      tf.cumsum(tf.reshape(candidate_matrix, [-1])),
+      [-1, tgt_len])
+
+  masked_matrix = (tf.cast(cumsum_matrix <= num_predict, tf.float32)
+                   * candidate_matrix)
+                   
+  masked_type_matrix = (tf.cast(cumsum_matrix <= num_predict, tf.float32)
+                        * (candidate_matrix * del_rep_mask[:, None]))
+  is_masked = tf.reduce_sum(masked_type_matrix, axis=0)
+
+  segment_range = tf.cast(tf.range(1, tf.shape(candidate_matrix)[0] + 1),
+                          dtype=candidate_matrix.dtype)
+  segment_matrix = segment_range[:, None] * candidate_matrix
+  segment_ids = tf.reduce_sum(segment_matrix * masked_matrix, axis=0)
+  segment_ids = tf.cast(segment_ids, dtype=inputs.dtype)
+
+  pos_mat = tf.cumsum(candidate_matrix, axis=1, exclusive=True)
+  pos_seq = tf.reduce_sum(pos_mat * masked_matrix, axis=0)
+
+  return is_masked, segment_ids, pos_seq
+
+
+def _token_span_mask(inputs, tgt_len, num_predict, del_rep_mask):
+  """Sample token spans as prediction targets."""
+  mask_alpha = tgt_len / num_predict
+  round_to_int = lambda x: tf.cast(x, tf.int64)
+
+  # Sample span lengths from a zipf distribution
+  probs = np.array([1.0 for i in (FLAGS.min_tok, FLAGS.max_tok + 1)])
+
+  probs /= np.sum(probs)
+  logits = tf.constant(np.log(probs), dtype=tf.float32)
+
+  # +1 is denote that in decoder there will be a placeholder, in encoder we will
+  # remove the last one, this also prevent the adjacent span
+  span_lens = tf.random.categorical(
+      logits=logits[None],
+      num_samples=num_predict,
+      dtype=tf.int64,
+  )[0] + FLAGS.min_tok
+
+  # Sample the ratio [0.0, 1.0) of left context lengths
+  span_lens_float = tf.cast(span_lens, tf.float32)
+  left_ratio = tf.random.uniform(shape=[num_predict], minval=0.0, maxval=1.0)
+  left_ctx_len = left_ratio * span_lens_float * (mask_alpha - 1)
+  left_ctx_len = round_to_int(left_ctx_len)
+
+  # Compute the offset from left start to the right end
+  right_offset = round_to_int(span_lens_float * mask_alpha) - left_ctx_len
+  # remove the adjacent case
+  left_ctx_len = left_ctx_len + 1
+
+  # Get the actual begin and end indices
+  beg_indices = (tf.cumsum(left_ctx_len) +
+                 tf.cumsum(right_offset, exclusive=True))
+  end_indices = beg_indices + span_lens
+
+  # Remove out of range indices
+  valid_idx_mask = end_indices <= tgt_len
+  beg_indices = tf.boolean_mask(beg_indices, valid_idx_mask)
+  end_indices = tf.boolean_mask(end_indices, valid_idx_mask)
+
+  # Shuffle valid indices
+  num_valid = tf.cast(tf.shape(beg_indices)[0], tf.int64)
+  order = tf.random_shuffle(tf.range(num_valid, dtype=tf.int64))
+  beg_indices = tf.gather(beg_indices, order)
+  end_indices = tf.gather(end_indices, order)
+  del_rep_mask = tf.gather(del_rep_mask, order)
+
+  return _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len,
+                           num_predict, del_rep_mask) 
 
 def get_type_id(tgt_len, tgt_idx, type_val):
   """Deal with type id for insertion."""
@@ -59,41 +150,60 @@ def create_dae_features(example, seq_len, use_bfloat16):
       [inputs, tf.constant(FLAGS.eos_id, shape=[1], dtype=tf_int)], 0)
   eos_mask = tf.equal(inputs, FLAGS.eos_id)
   non_eos_mask = tf.logical_not(eos_mask)
+  example["inputs"] = inputs
 
   type_id = example.pop("type_id")
   type_id = tf.concat([type_id, type_id[-1:]], 0)
+  example["type_id"] = type_id
 
-  ##### Sample positions for different operations
-  # (1) Sample deletion positions
-  del_num = int(math.ceil(seq_len * FLAGS.del_ratio))
-  del_uniform = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
-  _, del_idx = tf.math.top_k(del_uniform, k=del_num)
-  del_mask = tf.logical_and(
-      tf.reduce_sum(tf.one_hot(del_idx, seq_len, dtype=tf_int), 0) > 0,
-      non_eos_mask)
+  num_predict = int(seq_len * (FLAGS.del_ratio + FLAGS.rep_ratio))
+  # generate delete and replace mask for span
+  alpha = FLAGS.del_ratio / (FLAGS.del_ratio + FLAGS.rep_ratio)
+  uniform = tf.random.uniform(shape=[num_predict], minval=0, maxval=1)
+  # delete and rep mask 1 for del and 2 for rep
+  del_rep_mask = tf.cast(uniform < alpha, tf.float32) + 1
+
+  del_rep_mask, segment_ids, pos_seq = _token_span_mask(
+      inputs, seq_len, num_predict, del_rep_mask)
+  
+  del_mask = tf.equal(del_rep_mask, 1)
   non_del_mask = tf.logical_not(del_mask)
+  rep_mask = tf.equal(del_rep_mask, 2)
 
-  # (2) Sample insertion positions given deletion
+  # maximum number of edit op
   ins_num = int(math.ceil(seq_len * FLAGS.ins_ratio))
-  right_shift_del_mask = tf.concat(
-      [tf.constant(False, shape=[1], dtype=tf.bool), del_mask[:-1]], axis=0)
-  non_ins_mask = tf.logical_or(del_mask, right_shift_del_mask)
-  non_ins_mask = tf.logical_or(non_ins_mask, eos_mask)
-  ins_uniform = tf.random.uniform(shape=[ins_num, seq_len], minval=0, maxval=1)
-  ins_uniform -= 10 * tf.cast(non_ins_mask, tf.float32)
-  ins_idx = tf.argmax(ins_uniform, axis=1)
-  ins_cnt = tf.reduce_sum(tf.one_hot(ins_idx, seq_len, dtype=tf_int), 0)
+  del_num = num_predict
+  rep_num = num_predict
+  actual_rep_num = tf.reduce_sum(tf.cast(rep_mask, tf.float32))
+  actual_del_num = tf.reduce_sum(tf.cast(del_mask, tf.float32))
 
-  # (3) Sample replace positions given deletion & insertion
-  rep_num = int(math.ceil(seq_len * FLAGS.rep_ratio))
-  non_rep_mask = tf.logical_or(tf.greater(ins_cnt, 0), non_ins_mask)
-  non_rep_mask = tf.logical_or(non_rep_mask, eos_mask)
-  rep_uniform = tf.random.uniform(shape=[seq_len], minval=0, maxval=1)
-  rep_uniform -= 10 * tf.cast(non_rep_mask, tf.float32)
-  _, rep_idx = tf.math.top_k(rep_uniform, k=rep_num)
-  rep_mask = tf.logical_and(
-      tf.reduce_sum(tf.one_hot(rep_idx, seq_len, dtype=tf_int), 0) > 0,
-      tf.logical_not(non_rep_mask))
+  # Sample insertion positions given deletion
+  non_ins_mask = del_rep_mask > 0
+  right_shift_del_sup_mask = tf.concat(
+      [tf.constant(False, shape=[1], dtype=tf.bool), non_ins_mask[:-1]], axis=0)
+  non_ins_mask = tf.logical_or(non_ins_mask, right_shift_del_sup_mask)
+  non_ins_mask = tf.logical_or(non_ins_mask, eos_mask)
+  # obtain a shuffled index
+  ins_idx = tf.range(seq_len, dtype=tf.int64)
+  ins_idx = tf.boolean_mask(ins_idx, tf.logical_not(non_ins_mask))
+  ins_idx = tf.random_shuffle(ins_idx)
+  
+  # uniform span length
+  logits = tf.ones(shape=[FLAGS.max_tok - FLAGS.min_tok + 1])
+  span_lens = tf.random.categorical(
+      logits=logits[None],
+      num_samples=tf.shape(ins_idx)[0],
+      dtype=tf_int,
+  )[0] + FLAGS.min_tok
+  valid_span = tf.cumsum(span_lens) < ins_num
+  
+  ins_idx = tf.boolean_mask(ins_idx, valid_span)
+  ins_cnt = tf.boolean_mask(span_lens, valid_span)
+  ins_cnt = tf.scatter_nd(
+      shape=[seq_len], 
+      indices=ins_idx[:, None],
+      updates=ins_cnt
+  )
 
   # change replaced locations to <mask>
   rep_input = tf.where(
@@ -264,25 +374,30 @@ def create_dae_features(example, seq_len, use_bfloat16):
   # Convert the rep idx from encoder part to decoder. Used to remove the loss
   # of generated tokens that are equal to original tokens
 
-  # `rep_enc2dec_full`: permutation matrix [enc_num_mask, dec_len]
-  enc_rep_map_idx = tf.boolean_mask(tf.range(enc_num_mask), gen_tgt_mask)
-  dec_rep_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_rep_mask)
-  dec_rep_idx = tf.one_hot(dec_rep_idx, FLAGS.dec_len)
-  rep_enc2dec_full = tf.scatter_nd(
-      shape=[enc_num_mask, FLAGS.dec_len],
-      indices=enc_rep_map_idx[:, None],
-      updates=dec_rep_idx)
-  rep_enc2dec_full = tf.cast(rep_enc2dec_full, tf.float32)
+  if actual_rep_num > 0:
+    # `rep_enc2dec_full`: permutation matrix [enc_num_mask, dec_len]
+    enc_rep_map_idx = tf.boolean_mask(tf.range(enc_num_mask), gen_tgt_mask)
+    dec_rep_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_rep_mask)
+    dec_rep_idx = tf.one_hot(dec_rep_idx, FLAGS.dec_len)
+    rep_enc2dec_full = tf.scatter_nd(
+        shape=[enc_num_mask, FLAGS.dec_len],
+        indices=enc_rep_map_idx[:, None],
+        updates=dec_rep_idx)
+    rep_enc2dec_full = tf.cast(rep_enc2dec_full, tf.float32)
 
-  # `rep_enc2dec_part`: permutation matrix [enc_num_mask, dec_num_mask]
-  is_rep = tf.boolean_mask(dec_rep_mask, dec_edit_mask)
-  dec_rep_map_idx = tf.boolean_mask(tf.range(dec_num_mask), is_rep)
-  dec_rep_map_idx = tf.one_hot(dec_rep_map_idx, dec_num_mask)
-  rep_enc2dec_part = tf.scatter_nd(
-      shape=[enc_num_mask, dec_num_mask],
-      indices=enc_rep_map_idx[:, None],
-      updates=dec_rep_map_idx)
-  rep_enc2dec_part = tf.cast(rep_enc2dec_part, tf.float32)
+    # `rep_enc2dec_part`: permutation matrix [enc_num_mask, dec_num_mask]
+    is_rep = tf.boolean_mask(dec_rep_mask, dec_edit_mask)
+    dec_rep_map_idx = tf.boolean_mask(tf.range(dec_num_mask), is_rep)
+    dec_rep_map_idx = tf.one_hot(dec_rep_map_idx, dec_num_mask)
+    rep_enc2dec_part = tf.scatter_nd(
+        shape=[enc_num_mask, dec_num_mask],
+        indices=enc_rep_map_idx[:, None],
+        updates=dec_rep_map_idx)
+    rep_enc2dec_part = tf.cast(rep_enc2dec_part, tf.float32)
+  else:
+    rep_enc2dec_full = tf.zeros(shape=[enc_num_mask, FLAGS.dec_len])
+    rep_enc2dec_part = tf.zeros(shape=[enc_num_mask, dec_num_mask])
+
 
   ##### Put everything into the example
   example["gen_inp"] = enc_seq

@@ -23,6 +23,7 @@ try:
   import google3.experimental.users.zihangd.pretrain.tpu_estimator_new as tpu_estimator
   import google3.experimental.users.zihangd.pretrain.model_func_builder as model_func_builder
   import google3.experimental.users.zihangd.pretrain.dae_input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.daespan_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 
   run_internal = True
@@ -33,6 +34,7 @@ except ImportError as e:
   import tpu_estimator_new as tpu_estimator
   import model_func_builder
   import dae_input_func_builder as input_func_builder
+  import daespan_input_func_builder as span_input_func_builder
   from tokenization import get_tokenizer
 
   run_internal = False
@@ -116,7 +118,26 @@ flags.DEFINE_string("eval_split", default="dev",
 ##### Data config
 flags.DEFINE_integer("seq_len", default=0,
                      help="tgt len for objective; 0 for not using it")
-
+flags.DEFINE_bool("span_version", default=False,
+                  help="generate edit span, the default distribtion is uniform \
+                        on (1,5).")
+flags.DEFINE_float("del_ratio", default=0.1,
+                   help="#delete / #tok ratio.")
+flags.DEFINE_float("ins_ratio", default=0.1,
+                   help="#insert / #tok ratio.")
+flags.DEFINE_float("rep_ratio", default=0.1,
+                   help="#replace / #tok ratio.")
+flags.DEFINE_integer("enc_len", default=256,
+                     help="Maximum encoder input length.")
+flags.DEFINE_integer("dec_len", default=256,
+                     help="Maximum decoder input length.")
+flags.DEFINE_integer("del_label", default=1,
+                     help="Edit label id for delete.")
+flags.DEFINE_integer("ins_label", default=2,
+                     help="Edit label id for insert.")
+flags.DEFINE_integer("rep_label", default=3,
+                     help="Edit label id for replace.")
+                     
 ##### Loss related
 flags.DEFINE_bool("tie_weight", default=True,
                   help="Tie embeddings.")
@@ -308,8 +329,10 @@ def get_input_fn(split):
       use_bfloat16=FLAGS.use_bfloat16,
   )
 
-  input_fn = input_func_builder.get_input_fn(**kwargs)
-
+  if FLAGS.span_version:
+    input_fn = span_input_func_builder.get_input_fn(**kwargs)
+  else:
+    input_fn = input_func_builder.get_input_fn(**kwargs)
   return input_fn
 
 

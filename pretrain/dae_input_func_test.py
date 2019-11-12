@@ -13,7 +13,8 @@ try:
 except ImportError as e:
   print(e)
   import tensorflow as tf
-  import dae_input_func_builder as input_func_builder
+  #import dae_input_func_builder as input_func_builder
+  import daespan_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 # pylint: enable=g-import-not-at-top
 
@@ -35,7 +36,22 @@ flags.DEFINE_string("split", default="train",
 flags.DEFINE_integer("num_core_per_host", default=16, help="num core per host")
 flags.DEFINE_integer("num_example", default=2,
                      help="Num of examples to see.")
-
+flags.DEFINE_float("del_ratio", default=0.1,
+                   help="#delete / #tok ratio.")
+flags.DEFINE_float("ins_ratio", default=0.1,
+                   help="#insert / #tok ratio.")
+flags.DEFINE_float("rep_ratio", default=0.1,
+                   help="#replace / #tok ratio.")
+flags.DEFINE_integer("enc_len", default=256,
+                     help="Maximum encoder input length.")
+flags.DEFINE_integer("dec_len", default=256,
+                     help="Maximum decoder input length.")
+flags.DEFINE_integer("del_label", default=1,
+                     help="Edit label id for delete.")
+flags.DEFINE_integer("ins_label", default=2,
+                     help="Edit label id for insert.")
+flags.DEFINE_integer("rep_label", default=3,
+                     help="Edit label id for replace.")
 FLAGS = flags.FLAGS
 
 
