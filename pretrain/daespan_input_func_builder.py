@@ -275,6 +275,8 @@ def create_dae_features(example, seq_len, use_bfloat16):
                              updates=enc_val)
   is_rep = tf.equal(no_ins_inp, FLAGS.mask_id)
   gen_tgt_mask = tf.boolean_mask(is_rep, is_masked)
+  padding = tf.zeros(shape=[map_pad_len], dtype=gen_tgt_mask.dtype)
+  gen_tgt_mask = tf.concat([gen_tgt_mask, padding], axis=0)
   gen_tgt_mask.set_shape([enc_num_mask])
 
   # gen_tgt: scatter `rep_num` replaced ids to the correct positions in the
