@@ -74,7 +74,7 @@ def _token_span_mask(inputs, tgt_len, num_predict, del_rep_mask):
   round_to_int = lambda x: tf.cast(x, tf.int64)
 
   # Sample span lengths from a zipf distribution
-  probs = np.array([1.0 for i in (FLAGS.min_tok, FLAGS.max_tok + 1)])
+  probs = np.array([1.0 for i in range(FLAGS.min_tok, FLAGS.max_tok + 1)])
 
   probs /= np.sum(probs)
   logits = tf.constant(np.log(probs), dtype=tf.float32)
@@ -158,6 +158,7 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   num_predict = int(seq_len * (FLAGS.del_ratio + FLAGS.rep_ratio))
   # generate delete and replace mask for span
+  assert FLAGS.del_ratio + FLAGS.rep_ratio > 0
   alpha = FLAGS.del_ratio / (FLAGS.del_ratio + FLAGS.rep_ratio)
   uniform = tf.random.uniform(shape=[num_predict], minval=0, maxval=1)
   # delete and rep mask 1 for del and 2 for rep
@@ -190,6 +191,7 @@ def create_dae_features(example, seq_len, use_bfloat16):
   
   # uniform span length
   logits = tf.ones(shape=[FLAGS.max_tok - FLAGS.min_tok + 1])
+  lgotis = tf.math.log(logits/tf.reduce_sum(logits))
   span_lens = tf.random.categorical(
       logits=logits[None],
       num_samples=tf.shape(ins_idx)[0],
@@ -285,7 +287,7 @@ def create_dae_features(example, seq_len, use_bfloat16):
       tf.constant(FLAGS.pad_id, shape=[enc_num_mask], dtype=tf_int),
       indices=gen_tgt_idx[:, None],
       updates=gen_tgt_val)
-
+  
   ############################
   ##### Decoder features #####
   ############################
@@ -375,8 +377,11 @@ def create_dae_features(example, seq_len, use_bfloat16):
   # of generated tokens that are equal to original tokens
 
   if actual_rep_num > 0:
+    dec_rep_num = tf.reduce_sum(tf.cast(dec_rep_mask, tf_int))
     # `rep_enc2dec_full`: permutation matrix [enc_num_mask, dec_len]
     enc_rep_map_idx = tf.boolean_mask(tf.range(enc_num_mask), gen_tgt_mask)
+    enc_rep_map_idx = enc_rep_map_idx[:dec_rep_num]
+
     dec_rep_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_rep_mask)
     dec_rep_idx = tf.one_hot(dec_rep_idx, FLAGS.dec_len)
     rep_enc2dec_full = tf.scatter_nd(
