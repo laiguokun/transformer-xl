@@ -1,4 +1,4 @@
-"""Pretraining models."""
+"""Pretraining TFM model."""
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -20,6 +20,7 @@ try:
   from google3.experimental.users.zihangd.pretrain.common_ops import positionwise_ffn
   from google3.experimental.users.zihangd.pretrain.common_ops import multihead_attn
   from google3.experimental.users.zihangd.pretrain.common_ops import layer_norm
+  from google3.experimental.users.zihangd.pretrain.common_ops import rel_shift
 except ImportError:
   from common_ops import update_monitor_dict
   from common_ops import sinusoid_positional_encoding
@@ -30,15 +31,16 @@ except ImportError:
   from common_ops import positionwise_ffn
   from common_ops import multihead_attn
   from common_ops import layer_norm
+  from common_ops import rel_shift
 # pylint: enable=g-import-not-at-top
 
 
 ##### Model configuration
 # Type
-flags.DEFINE_enum("model_type", "tfm", ["tfm"],
-                  help="Type of the transformer model.")
 flags.DEFINE_enum("input_proc", "inv_sqrt", ["inv_sqrt", "layer_norm"],
                   help="How to preprocess input.")
+flags.DEFINE_bool("rel_attn", False,
+                  help="Whether to use relative pattention.")
 flags.DEFINE_bool("lm_proj", False,
                   help="Whether to use another projection before the LM loss.")
 flags.DEFINE_bool("softmax_bias", False,
@@ -81,8 +83,6 @@ flags.DEFINE_string("summary_type", default="first",
                     help="Method used to summarize a sequence into a vector.")
 
 # TFM-XL specific
-flags.DEFINE_bool("untie_r", default=True,
-                  help="Untie r_w_bias and r_r_bias")
 flags.DEFINE_integer("mem_len", default=0,
                      help="Number of steps to cache")
 
@@ -110,8 +110,8 @@ FLAGS = flags.FLAGS
 
 def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
              is_training, word_embed_table=None, type_embed_table=None,
-             pos_seq=None, clamp_len=-1, use_tpu=True, return_embed_table=False,
-             reuse=False, scope="input"):
+             rel_attn=False, pos_seq=None, clamp_len=-1, use_tpu=True,
+             return_embed_table=False, reuse=False, scope="input"):
   """Input layer for TFM used in machine translation."""
   tf_float = tf.bfloat16 if FLAGS.use_bfloat16 else tf.float32
   tf.logging.info("===== Input layer =====")
@@ -155,15 +155,15 @@ def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
           dtype=tf_float,
           scope="type_embedding")
       word_emb += type_emb * scale
-    else:
-      type_embed_table = None
 
     ##### Absolute positional embedding
-    with tf.variable_scope("pos_embedding", reuse=reuse):
-      pos_emb = sinusoid_positional_encoding(
-          seq_len, d_embed, pos_seq=pos_seq, clamp_len=clamp_len,
-          dtype=tf_float)
-      word_emb += pos_emb
+    if not rel_attn:
+      with tf.variable_scope("pos_embedding", reuse=reuse):
+        if pos_seq is None:
+          pos_seq = tf.range(0, seq_len, 1.0)
+        pos_emb = sinusoid_positional_encoding(
+            pos_seq, d_embed, clamp_len=clamp_len, dtype=tf_float)
+        word_emb += pos_emb
 
     ##### Dropout
     output = tf.layers.dropout(word_emb, dropout, training=is_training)
@@ -177,7 +177,8 @@ def mt_input(inputs, type_id, n_token, n_type, d_embed, dropout, initializer,
 def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
                 initializer, is_training, word_embed_table=None,
                 type_embed_table=None, pos_embed_table=None, use_tpu=True,
-                return_embed_table=False, reuse=False, scope="input"):
+                rel_attn=False, return_embed_table=False, reuse=False,
+                scope="input"):
   """Turn inputs tokens to embedding."""
 
   tf_float = tf.bfloat16 if FLAGS.use_bfloat16 else tf.float32
@@ -212,14 +213,15 @@ def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
       type_embed_table = None
 
     ##### Absolute positional embedding
-    with tf.variable_scope("pos_embedding", reuse=reuse):
-      if pos_embed_table is None:
-        pos_embed_table = tf.get_variable("lookup_table", [n_pos, d_embed],
-                                          initializer=initializer,
-                                          dtype=tf_float)
-      pos_emb = pos_embed_table[:seq_len]
-      pos_emb = tf.broadcast_to(pos_emb[None], tf.shape(word_emb))
-      word_emb += pos_emb
+    if not rel_attn:
+      with tf.variable_scope("pos_embedding", reuse=reuse):
+        if pos_embed_table is None:
+          pos_embed_table = tf.get_variable("lookup_table", [n_pos, d_embed],
+                                            initializer=initializer,
+                                            dtype=tf_float)
+        pos_emb = pos_embed_table[:seq_len]
+        pos_emb = tf.broadcast_to(pos_emb[None], tf.shape(word_emb))
+        word_emb += pos_emb
 
     ##### Input embedding layer normalization and dropout
     word_emb = layer_norm(
@@ -232,11 +234,30 @@ def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
     return output
 
 
+def rel_pos_encoding(output, d_model, n_head, clamp_len, dropout, is_training,
+                     initializer):
+  """Create inputs related to relative position encoding."""
+  seq_len = tf.shape(output)[1]
+  rel_pos_seq = tf.range(seq_len, -seq_len, -1)
+  pos_enc = sinusoid_positional_encoding(
+      rel_pos_seq, d_model, clamp_len=clamp_len, dtype=output.dtype)
+  pos_enc = tf.layers.dropout(pos_enc, dropout, training=is_training)
+
+  pos_vec = tf.get_variable("pos_vec", [n_head, d_model],
+                            dtype=output.dtype, initializer=initializer)
+  attn_bias = tf.einsum("nd,id->ni", pos_vec, pos_enc)[:, None, :]
+  attn_bias = tf.broadcast_to(attn_bias, [n_head, seq_len, 2 * seq_len])
+  attn_bias = rel_shift(attn_bias, row_dim=-2, klen=seq_len)
+
+  return attn_bias
+
+
 def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
                 dropout, dropatt, dropact, initializer, is_training,
                 context=None, context_mask=None, input_mask=None,
                 perm_mask=None, ff_activation="relu", causal=False,
-                return_all_hidden=False, scope="transformer"):
+                rel_attn=False, clamp_len=-1, return_all_hidden=False,
+                scope="transformer"):
   """Transformer model."""
 
   monitor_dict = {}
@@ -278,6 +299,14 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
 
     hiddens.append(output)
 
+    ##### Get relative attention bias
+    if rel_attn:
+      tf.logging.info("Use relative attention")
+      attn_bias = rel_pos_encoding(
+          output, d_model, n_head, clamp_len, dropout, is_training, initializer)
+    else:
+      attn_bias = None
+
     ##### Attention layers
     for i in range(n_layer):
       with tf.variable_scope("layer_{}".format(i)):
@@ -293,6 +322,7 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
             dropatt=dropatt,
             is_training=is_training,
             kernel_initializer=initializer,
+            attn_bias=attn_bias,
             scope="self_attn")
 
         if context is not None:

@@ -17,20 +17,15 @@ try:
   from google3.experimental.users.zihangd.pretrain.data_utils import type_cast
   from google3.experimental.users.zihangd.pretrain.data_utils import sparse_to_dense
   from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import chunk_to_sequence
-  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import create_target_mapping
-  from google3.experimental.users.zihangd.pretrain.mlm_input_func_builder import discrepancy_correction
 except ImportError as e:
   from data_utils import type_cast
   from data_utils import sparse_to_dense
   from mlm_input_func_builder import chunk_to_sequence
-  from mlm_input_func_builder import create_target_mapping
 # pylint: enable=g-import-not-at-top
 
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_bool("origin_pos", default=True,
-                  help="Use the original enc position for the dec inputs.")
 
 def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
   """Turn begin and end indices into actual mask."""
@@ -39,6 +34,7 @@ def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
       non_func_mask,
       tf.range(tgt_len, dtype=tf.int64),
       tf.constant(-1, shape=[tgt_len], dtype=tf.int64))
+  # [num_span x tgt_len]
   candidate_matrix = tf.cast(
       tf.logical_and(
           all_indices[None, :] >= beg_indices[:, None],
@@ -58,6 +54,7 @@ def _idx_pair_to_mask(beg_indices, end_indices, inputs, tgt_len, num_predict):
   segment_ids = tf.reduce_sum(segment_matrix * masked_matrix, axis=0)
   segment_ids = tf.cast(segment_ids, dtype=inputs.dtype)
 
+  # position sequence within each sampled span
   pos_mat = tf.cumsum(candidate_matrix, axis=1, exclusive=True)
   pos_seq = tf.reduce_sum(pos_mat * masked_matrix, axis=0)
 
@@ -70,9 +67,11 @@ def _token_span_mask(inputs, tgt_len, num_predict):
   round_to_int = lambda x: tf.cast(x, tf.int64)
 
   # Sample span lengths from a zipf distribution
-  span_len_seq = np.arange(FLAGS.min_tok, FLAGS.max_tok + 1)
-  probs = np.array([1.0 /  (i + 1) for i in span_len_seq])
+  # span_len_seq = np.arange(FLAGS.min_tok, FLAGS.max_tok + 1)
+  # probs = np.array([1.0 /  (i + 1) for i in span_len_seq])
 
+  # Sample from a uniform distribution
+  probs = np.ones([FLAGS.max_tok - FLAGS.min_tok + 1])
   probs /= np.sum(probs)
   logits = tf.constant(np.log(probs), dtype=tf.float32)
 
@@ -119,16 +118,18 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   type_id = example.pop("type_id")
 
   ph_idx_0 = FLAGS.ph_id_0
+
   # sample mask
   is_masked, segment_ids, pos_seq = _token_span_mask(
       inputs, seq_len, num_predict)
-  
+
   # because decoder has one place-holder, remove the last token in each span
   masked_idx = tf.boolean_mask(tf.range(seq_len), is_masked)
+  num_masked = tf.shape(masked_idx)[0]
   is_beginning = tf.equal(tf.boolean_mask(pos_seq, is_masked), 0)
-  ending_idx_m = tf.boolean_mask(tf.range(num_predict), is_beginning)[1:] 
+  ending_idx_m = tf.boolean_mask(tf.range(num_predict), is_beginning)[1:]
   ending_idx_m = tf.concat(
-      [ending_idx_m, tf.ones(shape=[1], dtype=tf.int32) * tf.shape(masked_idx)[0]],
+      [ending_idx_m, tf.ones(shape=[1], dtype=tf.int32) * num_masked],
       axis=0) - 1
   ending_idx = tf.gather(masked_idx, ending_idx_m)
   padding = tf.zeros(shape=[tf.shape(ending_idx)[0]])
@@ -146,11 +147,11 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
       indices=ending_idx[:, None],
       updates=tf.cast(padding, dtype=pos_seq.dtype))
 
-  
-  # encoder inp
+  ##### Encoder inp
   masked_idx = tf.boolean_mask(tf.range(seq_len), is_masked)
   is_beginning = tf.equal(tf.boolean_mask(pos_seq, is_masked), 0)
   beginning_idx = tf.boolean_mask(masked_idx, is_beginning)
+
   non_masked = tf.logical_not(is_masked)
   segment_num = tf.shape(beginning_idx)[0]
   enc_seq_mask = tf.tensor_scatter_nd_update(
@@ -165,7 +166,7 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
       beginning_idx)
   ph_idx_val = tf.cast(tf.range(segment_num) + ph_idx_0, dtype=tf.int64)
   enc_seq = tf.tensor_scatter_nd_update(
-      enc_seq, 
+      enc_seq,
       indices=new_beginning_idx[:, None],
       updates=ph_idx_val)
 
@@ -180,11 +181,12 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   enc_type = tf.reshape(enc_type, [seq_len])
 
   example["source"] = enc_seq
-  example["source_segmentation"] = tf.cast(tf.not_equal(enc_seq, 0), dtype=tf.int64)
+  example["source_segmentation"] = tf.cast(
+      tf.not_equal(enc_seq, 0), dtype=tf.int64)
   example["source_position"] = tf.range(seq_len, dtype=tf.int64)
   example["source_type"] = enc_type
-  
-  # decoder inp and out
+
+  ##### Decoder inp and out
   # add one because we append a final place holder at the end
   num_predict = num_predict + 1
   mask = tf.boolean_mask(tf.ones([seq_len], dtype=tf.int64), is_masked)
@@ -206,18 +208,22 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   ph_idx = tf.concat(
       [ph_idx, tf.ones(shape=[1], dtype=tf.int64) * last_idx],
       axis=0)
-  ph_idx_val = tf.cast(tf.range(segment_num + 1) + ph_idx_0, dtype=tf.int64)
+  # ph_idx_val = tf.cast(tf.range(segment_num + 1) + ph_idx_0, dtype=tf.int64)
+  ph_idx_val = tf.concat(
+      [tf.range(tf.cast(segment_num, dtype=dec_seq.dtype)) + ph_idx_0,
+       tf.zeros(shape=[1], dtype=dec_seq.dtype) + FLAGS.eos_id], 0)
   dec_seq = tf.tensor_scatter_nd_update(
       dec_seq,
       indices=ph_idx[:, None],
       updates=ph_idx_val)
-  
-  pad_len = num_predict - (last_idx + 1)
+
+  pad_len = num_predict - last_idx
   target_seg = tf.concat(
       [tf.ones(shape=[num_predict-pad_len], dtype=tf.int64),
        tf.zeros(shape=[pad_len], dtype=tf.int64)],
       axis=0
   )
+  target_seg.set_shape([num_predict])
   example["target"] = dec_seq
   example["target_segmentation"] = target_seg
   example["target_position"] = tf.range(num_predict, dtype=tf.int64)
@@ -368,16 +374,16 @@ def sent_t5_dataset(params,
 
 
 def semidoc_t5_dataset(params,
-                         file_names,
-                         num_hosts,
-                         num_core_per_host,
-                         seq_len,
-                         num_predict,
-                         is_training,
-                         use_bfloat16=False,
-                         num_threads=64,
-                         record_shuffle_size=256,
-                         sequence_shuffle_size=2048):
+                       file_names,
+                       num_hosts,
+                       num_core_per_host,
+                       seq_len,
+                       num_predict,
+                       is_training,
+                       use_bfloat16=False,
+                       num_threads=64,
+                       record_shuffle_size=256,
+                       sequence_shuffle_size=2048):
   # pylint: disable=g-doc-args
   """Get semi-doc level t5 dataset.
 
@@ -434,15 +440,15 @@ def semidoc_t5_dataset(params,
 
 
 def doc_t5_dataset(params,
-                     file_names,
-                     num_hosts,
-                     num_core_per_host,
-                     seq_len,
-                     num_predict,
-                     is_training,
-                     use_bfloat16=False,
-                     num_threads=64,
-                     record_shuffle_size=256):
+                   file_names,
+                   num_hosts,
+                   num_core_per_host,
+                   seq_len,
+                   num_predict,
+                   is_training,
+                   use_bfloat16=False,
+                   num_threads=64,
+                   record_shuffle_size=256):
   """Get document level t5 dataset."""
 
   bsz_per_core = params["batch_size"]

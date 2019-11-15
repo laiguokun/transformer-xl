@@ -125,10 +125,6 @@ flags.DEFINE_bool("tie_weight", default=True,
 flags.DEFINE_bool("attn_to_mask", default=True,
                   help="For one-stream loss, whether allow model to attend "
                   "the positions with [mask] tokens.")
-flags.DEFINE_float("enc_weight", default=0.5,
-                   help="Weight to the encoder loss.")
-flags.DEFINE_float("dec_weight", default=0.5,
-                   help="Weight to the decoder loss.")
 flags.DEFINE_float("label_smooth", default=None,
                    help="label smoothing.")
 flags.DEFINE_bool("joint", default=False,
