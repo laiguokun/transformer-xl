@@ -5,10 +5,18 @@ from __future__ import print_function
 
 import collections
 import re
-
+from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 import tensorflow as tf
+import functools
+import math
 
+try:
+  import google3.experimental.users.zihangd.pretrain.model as model
+except ImportError:
+  import model
+
+FLAGS = flags.FLAGS
 
 def get_assignment_map_from_checkpoint(tvars, init_checkpoint):
   """Compute the union of the current variables and checkpoint variables."""
@@ -77,3 +85,144 @@ def construct_scalar_host_call(
   other_tensors = [monitor_dict[key] for key in metric_names]
 
   return host_call_fn, [global_step_tensor] + other_tensors
+
+def bf16_decorator(func):
+  @functools.wraps(func)
+  def wrapped_func(*args, **kwargs):
+    if FLAGS.use_bfloat16:
+      with tf.tpu.bfloat16_scope():
+        return func(*args, **kwargs)
+    else:
+      return func(*args, **kwargs)
+
+  return wrapped_func
+
+  
+def _get_initializer():
+  """Get variable intializer."""
+  tf.logging.info("Using %s initializer", FLAGS.init)
+  if FLAGS.init == "uniform":
+    initializer = tf.initializers.random_uniform(
+        minval=-FLAGS.init_range,
+        maxval=FLAGS.init_range,
+        seed=None)
+  elif FLAGS.init == "normal":
+    initializer = tf.initializers.random_normal(
+        stddev=FLAGS.init_std,
+        seed=None)
+  elif FLAGS.init == "truncated_normal":
+    initializer = tf.initializers.truncated_normal(
+        stddev=FLAGS.init_std,
+        seed=None)
+  else:
+    raise ValueError("Initializer {} not supported".format(FLAGS.init))
+  return initializer
+
+
+def _get_inp_func(n_token, d_embed, initializer, is_training, **kwargs):
+  """Prepare input function."""
+  if FLAGS.double_type:
+    n_type = FLAGS.n_type * 2 
+  else:
+    n_type = FLAGS.n_type
+  if FLAGS.input_proc == "inv_sqrt":
+    inp_func = functools.partial(
+        model.mt_input,
+        n_token=n_token,
+        n_type=n_type,
+        d_embed=d_embed,
+        dropout=FLAGS.dropout,
+        clamp_len=FLAGS.clamp_len,
+        initializer=initializer,
+        is_training=is_training,
+        use_tpu=FLAGS.use_tpu,
+        rel_attn=FLAGS.rel_attn,
+        **kwargs)
+  elif FLAGS.input_proc == "layer_norm":
+    inp_func = functools.partial(
+        model.input_layer,
+        n_token=n_token,
+        n_type=n_type,
+        n_pos=FLAGS.max_pos_len,
+        d_embed=d_embed,
+        dropout=FLAGS.dropout,
+        initializer=initializer,
+        is_training=is_training,
+        use_tpu=FLAGS.use_tpu,
+        rel_attn=FLAGS.rel_attn,
+        **kwargs)
+  else:
+    raise NotImplementedError
+
+  return inp_func
+
+
+def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
+  """Prepare transformer function."""
+
+  tfm_args = dict(
+      n_layer=FLAGS.n_layer,
+      d_model=FLAGS.d_model // shrink,
+      n_head=FLAGS.n_head // shrink,
+      d_head=FLAGS.d_head,
+      d_inner=FLAGS.d_inner // shrink,
+      dropout=FLAGS.dropout,
+      dropatt=FLAGS.dropatt,
+      dropact=FLAGS.dropact,
+      ff_activation=FLAGS.ff_activation,
+      rel_attn=FLAGS.rel_attn,
+      clamp_len=FLAGS.clamp_len,
+      initializer=initializer,
+      is_training=is_training,
+  )
+  tfm_args.update(kwargs)
+
+  if phase == "pretrain":
+    xl_args = dict(
+        mem_len=FLAGS.mem_len,
+    )
+  elif phase == "finetune":
+    xl_args = dict(
+        mem_len=None,
+    )
+  else:
+    raise ValueError("Unsupported phase {}".format(phase))
+  xl_args.update(tfm_args)
+  xl_args.update(kwargs)
+
+  tfm_func = functools.partial(
+      model.transformer,
+      **tfm_args)
+
+  return tfm_func
+
+def get_loss(features, labels, mems, n_token, is_training):
+  """Loss selector."""
+  if FLAGS.loss_type == "mlm":
+    return mlm_loss(features, labels, mems, n_token, is_training)
+  else:
+    raise NotImplementedError
+
+
+def extract_hiddens(inputs, type_id, n_token, is_training):
+  """Extract all hidden states."""
+  initializer = _get_initializer()
+
+  #### Transformer Model
+  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
+    inp_func = _get_inp_func(n_token,
+                             FLAGS.d_model,
+                             initializer,
+                             is_training)
+    embeddings = inp_func(inputs=inputs, type_id=type_id)
+
+    tfm_func = _get_tfm_func(initializer,
+                             is_training,
+                             phase="pretrain")
+    hiddens, _ = tfm_func(
+        inputs=embeddings,
+        input_mask=None,
+        perm_mask=None,
+        return_all_hidden=True)
+
+    return hiddens

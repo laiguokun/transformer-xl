@@ -252,6 +252,17 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   enc_type = get_type_id(FLAGS.enc_len, enc_idx, enc_type)
 
+  # edit label for encoder
+  enc_edit_label = tf.concat(
+      [tf.zeros(shape=[enc_non_pad_len], dtype=tf_int) + FLAGS.ins_label,
+       tf.zeros(shape=[enc_pad_len], dtype=tf_int)], 0)
+  rep_edit_label = tf.cast(rep_mask, tf_int) * FLAGS.rep_label
+  rep_edit_label = tf.boolean_mask(rep_edit_label, enc_valid_mask)
+  enc_edit_label = tf.tensor_scatter_nd_update(
+      enc_edit_label,
+      indices=enc_idx[:, None],
+      updates=rep_edit_label)
+
   ##############################
   ##### Generator features #####
   ##############################
@@ -414,7 +425,8 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   example["enc_type"] = enc_type
   example["enc_mask"] = enc_mask
-
+  example["enc_edit_label"] = enc_edit_label
+  
   example["dec_inp"] = dec_inp
   example["dec_tgt"] = dec_seq
   example["dec_type"] = dec_type

@@ -116,6 +116,8 @@ def _token_span_mask(inputs, tgt_len, num_predict):
 def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   """docs."""
   inputs = example["inputs"]
+  type_id = example.pop("type_id")
+
   ph_idx_0 = FLAGS.ph_id_0
   # sample mask
   is_masked, segment_ids, pos_seq = _token_span_mask(
@@ -156,6 +158,7 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
       indices=beginning_idx[:, None],
       updates=tf.ones(shape=[segment_num], dtype=tf.bool))
   enc_seq = tf.boolean_mask(inputs, enc_seq_mask)
+  enc_type = tf.boolean_mask(type_id, enc_seq_mask)
   
   new_beginning_idx = tf.gather(
       tf.cumsum(tf.cast(enc_seq_mask, dtype=tf.int64), exclusive=True),
@@ -171,9 +174,15 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
       [enc_seq, tf.zeros(shape=[pad_len], dtype=enc_seq.dtype)],
       axis=0)
   enc_seq = tf.reshape(enc_seq, [seq_len])
+  enc_type = tf.concat(
+      [enc_type, tf.zeros(shape=[pad_len], dtype=enc_type.dtype)],
+      axis=0)
+  enc_type = tf.reshape(enc_type, [seq_len])
+
   example["source"] = enc_seq
   example["source_segmentation"] = tf.cast(tf.not_equal(enc_seq, 0), dtype=tf.int64)
   example["source_position"] = tf.range(seq_len, dtype=tf.int64)
+  example["source_type"] = enc_type
   
   # decoder inp and out
   # add one because we append a final place holder at the end
@@ -186,6 +195,12 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
       shape=[num_predict],
       indices=mask_idx[:, None],
       updates=masked_tok)
+  masked_type = tf.boolean_mask(type_id, is_masked)
+  dec_type = tf.scatter_nd(
+      shape=[num_predict],
+      indices=mask_idx[:, None],
+      updates=masked_type)
+
   ph_idx = tf.boolean_mask(mask_idx, is_beginning) - 1
   last_idx = mask_idx[-1] + 1
   ph_idx = tf.concat(
@@ -206,6 +221,7 @@ def create_t5_target(example, seq_len, num_predict, use_bfloat16):
   example["target"] = dec_seq
   example["target_segmentation"] = target_seg
   example["target_position"] = tf.range(num_predict, dtype=tf.int64)
+  example["target_type"] = dec_type
   
   # type cast for example
   type_cast(example, use_bfloat16)

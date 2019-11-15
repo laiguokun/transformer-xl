@@ -140,6 +140,17 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   enc_type = get_type_id(FLAGS.enc_len, enc_idx, enc_type)
 
+  # edit label for encoder
+  enc_edit_label = tf.concat(
+      [tf.zeros(shape=[enc_non_pad_len], dtype=tf_int) + FLAGS.ins_label,
+       tf.zeros(shape=[enc_pad_len], dtype=tf_int)], 0)
+  rep_edit_label = tf.cast(rep_mask, tf_int) * FLAGS.rep_label
+  rep_edit_label = tf.boolean_mask(rep_edit_label, enc_valid_mask)
+  enc_edit_label = tf.tensor_scatter_nd_update(
+      enc_edit_label,
+      indices=enc_idx[:, None],
+      updates=rep_edit_label)
+
   ##############################
   ##### Generator features #####
   ##############################
@@ -265,7 +276,9 @@ def create_dae_features(example, seq_len, use_bfloat16):
   # of generated tokens that are equal to original tokens
 
   # `rep_enc2dec_full`: permutation matrix [enc_num_mask, dec_len]
+  dec_rep_num = tf.reduce_sum(tf.cast(dec_rep_mask, tf_int))
   enc_rep_map_idx = tf.boolean_mask(tf.range(enc_num_mask), gen_tgt_mask)
+  enc_rep_map_idx = enc_rep_map_idx[:dec_rep_num]
   dec_rep_idx = tf.boolean_mask(tf.range(FLAGS.dec_len), dec_rep_mask)
   dec_rep_idx = tf.one_hot(dec_rep_idx, FLAGS.dec_len)
   rep_enc2dec_full = tf.scatter_nd(
@@ -292,6 +305,7 @@ def create_dae_features(example, seq_len, use_bfloat16):
 
   example["enc_type"] = enc_type
   example["enc_mask"] = enc_mask
+  example["enc_edit_label"] = enc_edit_label
 
   example["dec_inp"] = dec_inp
   example["dec_tgt"] = dec_seq
@@ -303,6 +317,9 @@ def create_dae_features(example, seq_len, use_bfloat16):
   example["dec_lm_tgt_mask"] = dec_tgt_mask
   example["rep_enc2dec_full"] = rep_enc2dec_full
   example["rep_enc2dec_part"] = rep_enc2dec_part
+
+  example["enc_pos"] = tf.range(FLAGS.enc_len)
+  example["dec_pos"] = tf.range(FLAGS.dec_len)
 
   ##### type cast for example
   type_cast(example, use_bfloat16)

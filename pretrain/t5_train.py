@@ -131,6 +131,8 @@ flags.DEFINE_float("dec_weight", default=0.5,
                    help="Weight to the decoder loss.")
 flags.DEFINE_float("label_smooth", default=None,
                    help="label smoothing.")
+flags.DEFINE_bool("joint", default=False,
+                  help="Whether to joint model or enc-dec model")
 
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
@@ -172,8 +174,12 @@ def get_model_fn(n_token):
         idx += 1
 
     #### Get loss from inputs
-    total_loss, monitor_dict = model_func_builder.encdec_loss(
-        features, labels, n_token, is_training)
+    if FLAGS.joint:
+      total_loss, monitor_dict = model_func_builder.joint_loss(
+          features, labels, n_token, is_training)
+    else:
+      total_loss, monitor_dict = model_func_builder.encdec_loss(
+          features, labels, n_token, is_training)
     new_mems = {}
     #### Turn `new_mems` into `new_cache`
     new_cache = []

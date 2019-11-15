@@ -90,6 +90,12 @@ flags.DEFINE_integer("mem_len", default=0,
 flags.DEFINE_integer("gen_shrink", default=4,
                      help="Shrink the hidden dimension of the generator.")
 
+# joint model pretrain specific
+flags.DEFINE_bool("double_type", default=False,
+                  help="Use type id to differeniate the encoder and decoder \
+                        in the joint model. [0,n_type) for encoder, \
+                        (n_type, 2*n_type] for decoder")
+
 ##### Parameter initialization
 flags.DEFINE_enum("init", default="truncated_normal",
                   enum_values=["normal", "uniform", "truncated_normal"],
