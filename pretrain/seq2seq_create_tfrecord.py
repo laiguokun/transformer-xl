@@ -101,7 +101,11 @@ def _create_data(input_paths, src_tok, tgt_tok):
 
       line = line.strip()
       if line:
-        src, tgt = line.split("\t")
+        try:
+          src, tgt = line.split("\t")
+        except ValueError:
+          tf.logging.info("Skip %s", line)
+          continue
 
         src_ids = src_tok.convert_text_to_ids(src)
         tgt_ids = tgt_tok.convert_text_to_ids(tgt)

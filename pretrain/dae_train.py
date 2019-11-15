@@ -23,7 +23,7 @@ try:
   import google3.experimental.users.zihangd.pretrain.tpu_estimator_new as tpu_estimator
   import google3.experimental.users.zihangd.pretrain.model_func_builder as model_func_builder
   import google3.experimental.users.zihangd.pretrain.dae_input_func_builder as input_func_builder
-  import google3.experimental.users.zihangd.pretrain.daespan_input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.daespan_input_func_builder as span_input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 
   run_internal = True
@@ -119,8 +119,8 @@ flags.DEFINE_string("eval_split", default="dev",
 flags.DEFINE_integer("seq_len", default=0,
                      help="tgt len for objective; 0 for not using it")
 flags.DEFINE_bool("span_version", default=False,
-                  help="generate edit span, the default distribtion is uniform \
-                        on (1,5).")
+                  help="Generate edit span, the default distribtion is uniform"
+                  "on (1,5).")
 flags.DEFINE_float("del_ratio", default=0.1,
                    help="#delete / #tok ratio.")
 flags.DEFINE_float("ins_ratio", default=0.1,
@@ -137,7 +137,7 @@ flags.DEFINE_integer("ins_label", default=2,
                      help="Edit label id for insert.")
 flags.DEFINE_integer("rep_label", default=3,
                      help="Edit label id for replace.")
-                     
+
 ##### Loss related
 flags.DEFINE_bool("tie_weight", default=True,
                   help="Tie embeddings.")

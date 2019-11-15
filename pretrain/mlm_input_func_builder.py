@@ -26,10 +26,10 @@ flags.DEFINE_enum("sample_strategy", default="single_token",
                   enum_values=["single_token", "token_span"],
                   help="Stragey used to sample prediction targets.")
 
-flags.DEFINE_integer("max_tok", default=8,
+flags.DEFINE_integer("max_tok", default=4,
                      help="Maximum number of tokens to sample in a span."
                      "Effective when token_span strategy is used.")
-flags.DEFINE_integer("min_tok", default=8,
+flags.DEFINE_integer("min_tok", default=2,
                      help="Minimum number of tokens to sample in a span."
                      "Effective when token_span strategy is used.")
 

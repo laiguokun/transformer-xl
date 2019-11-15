@@ -8,12 +8,13 @@ import absl.logging as _logging  # pylint: disable=unused-import
 # pylint: disable=g-import-not-at-top
 try:
   import tensorflow.google as tf
-  import google3.experimental.users.zihangd.pretrain.dae_input_func_builder as input_func_builder
+  # import google3.experimental.users.zihangd.pretrain.dae_input_func_builder as input_func_builder
+  import google3.experimental.users.zihangd.pretrain.daespan_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 except ImportError as e:
   print(e)
   import tensorflow as tf
-  #import dae_input_func_builder as input_func_builder
+  # import dae_input_func_builder as input_func_builder
   import daespan_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 # pylint: enable=g-import-not-at-top
