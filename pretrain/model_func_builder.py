@@ -70,6 +70,7 @@ def _get_inp_func(n_token, d_embed, initializer, is_training, **kwargs):
         initializer=initializer,
         is_training=is_training,
         use_tpu=FLAGS.use_tpu,
+        rel_attn=FLAGS.rel_attn,
         **kwargs)
   elif FLAGS.input_proc == "layer_norm":
     inp_func = functools.partial(
@@ -82,6 +83,7 @@ def _get_inp_func(n_token, d_embed, initializer, is_training, **kwargs):
         initializer=initializer,
         is_training=is_training,
         use_tpu=FLAGS.use_tpu,
+        rel_attn=FLAGS.rel_attn,
         **kwargs)
   else:
     raise NotImplementedError
@@ -102,6 +104,8 @@ def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
       dropatt=FLAGS.dropatt,
       dropact=FLAGS.dropact,
       ff_activation=FLAGS.ff_activation,
+      rel_attn=FLAGS.rel_attn,
+      clamp_len=FLAGS.clamp_len,
       initializer=initializer,
       is_training=is_training,
   )
@@ -109,12 +113,10 @@ def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
 
   if phase == "pretrain":
     xl_args = dict(
-        untie_r=FLAGS.untie_r,
         mem_len=FLAGS.mem_len,
     )
   elif phase == "finetune":
     xl_args = dict(
-        untie_r=FLAGS.untie_r,
         mem_len=None,
     )
   else:
@@ -122,14 +124,9 @@ def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
   xl_args.update(tfm_args)
   xl_args.update(kwargs)
 
-  if FLAGS.model_type == "tfm":
-    tfm_func = functools.partial(
-        model.transformer,
-        **tfm_args)
-  elif FLAGS.model_type == "tfm_xl":
-    tfm_func = functools.partial(
-        model.transformer_xl,
-        **xl_args)
+  tfm_func = functools.partial(
+      model.transformer,
+      **tfm_args)
 
   return tfm_func
 
@@ -819,8 +816,7 @@ def encdec_loss(features, labels, n_token, is_training):
   # then the model should NOT attend
   tgt_to_tgt = tf.logical_or(
       tgt_to_tgt,
-      causal_mask
-  )
+      causal_mask)
   tgt_to_tgt = tf.cast(tgt_to_tgt, tf_float)
 
   # padding

@@ -71,34 +71,69 @@ def safe_softmax(inputs, *args, **kwargs):
 layer_norm = safe_precision(tf.contrib.layers.layer_norm)
 
 
-def sinusoid_positional_encoding(seq_len, d_model, pos_seq=None, bsz=None,
-                                 clamp_len=-1, dtype=tf.float32):
+def rel_shift(x, row_dim, klen=-1):
+  """Perform relative shift to form the relative attention score."""
+  ndims = x.shape.ndims
+  x_shape = tf.shape(x)
+
+  # Deal with negative indexing
+  if row_dim < 0:
+    row_dim = ndims + row_dim
+  assert row_dim >= 0
+
+  # Assume `col_dim` = `row_dim + 1`
+  col_dim = row_dim + 1
+  assert col_dim < ndims
+
+  tgt_shape_1, slice_begin_1, slice_len_1 = [], [], []
+  tgt_shape_2, slice_begin_2, slice_len_2 = [], [], []
+  for i in range(ndims):
+    slice_len_1.append(-1)
+    slice_begin_2.append(0)
+
+    if i == row_dim:
+      tgt_shape_1.append(x_shape[col_dim])
+      tgt_shape_2.append(x_shape[row_dim])
+      slice_begin_1.append(1)
+      slice_len_2.append(-1)
+    elif i == col_dim:
+      tgt_shape_1.append(x_shape[row_dim])
+      tgt_shape_2.append(x_shape[col_dim] - 1)
+      slice_begin_1.append(0)
+      slice_len_2.append(klen)
+    else:
+      tgt_shape_1.append(x_shape[i])
+      tgt_shape_2.append(x_shape[i])
+      slice_begin_1.append(0)
+      slice_len_2.append(-1)
+
+  x = tf.reshape(x, tgt_shape_1)
+  x = tf.slice(x, slice_begin_1, slice_len_1)
+  x = tf.reshape(x, tgt_shape_2)
+  x = tf.slice(x, slice_begin_2, slice_len_2)
+
+  return x
+
+
+def sinusoid_positional_encoding(pos_seq, d_model, clamp_len=-1,
+                                 dtype=tf.float32):
   """create relative positional encoding."""
   assert d_model % 2 == 0, "`d_model` must be an even number."
 
-  if pos_seq is None:
-    pos_seq = tf.range(0, seq_len, 1.0)[None]
-
   half_dim = d_model // 2
   freq_seq = tf.cast(tf.range(0, half_dim, 1.0), dtype=dtype)
-  if dtype is not None and dtype != tf.float32:
-    freq_seq = tf.cast(freq_seq, dtype=dtype)
   inv_freq = 1 / (10000 ** (freq_seq / half_dim))
 
-  # type cast
-  if dtype is not None and pos_seq.dtype != dtype:
-    pos_seq = tf.cast(pos_seq, dtype=dtype)
+  pos_seq = tf.cast(pos_seq, dtype=dtype)
 
   # clamp maximum length
   if clamp_len > 0:
     pos_seq = tf.clip_by_value(pos_seq, -clamp_len, clamp_len)
 
-  sinusoid_inp = tf.einsum("bi,d->bid", pos_seq, inv_freq)
+  einsum_prefix = get_einsum_prefix(pos_seq.shape.ndims - 1)
+  sinusoid_inp = tf.einsum("{0}i,d->{0}id".format(einsum_prefix),
+                           pos_seq, inv_freq)
   pos_emb = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], -1)
-
-  if bsz is not None and pos_seq is None:
-    length = tf.shape(pos_emb)[1]
-    pos_emb = tf.broadcast_to(pos_emb, [bsz, length, d_model])
 
   return pos_emb
 
@@ -297,11 +332,15 @@ def post_attention(h, attn_vec, d_model, n_head, d_head, dropout, is_training,
 
 
 def abs_attn_core(q_head, k_head, v_head, attn_mask, dropatt, is_training,
-                  scale):
+                  scale, attn_bias=None):
   """Core absolute positional attention operations."""
   monitor_dict = {}
 
   attn_score = tf.einsum("bind,bjnd->bnij", q_head, k_head)
+  if attn_bias is not None:
+    tf.logging.info("Attention bias shape: %s", attn_bias.shape)
+    attn_score += attn_bias
+
   attn_score *= scale
   if attn_mask is not None:
     tf.logging.info("Attention mask shape: %s", attn_mask.shape)
@@ -319,8 +358,8 @@ def abs_attn_core(q_head, k_head, v_head, attn_mask, dropatt, is_training,
 
 
 def multihead_attn(q, k, v, attn_mask, d_model, n_head, d_head, dropout,
-                   dropatt, is_training, kernel_initializer, residual=True,
-                   reuse=None, scope="abs_attn"):
+                   dropatt, is_training, kernel_initializer, attn_bias=None,
+                   residual=True, reuse=None, scope="abs_attn"):
   """Standard multi-head attention with absolute positional embedding."""
   monitor_dict = {}
 
@@ -336,7 +375,8 @@ def multihead_attn(q, k, v, attn_mask, d_model, n_head, d_head, dropout,
 
     # attention vector
     attn_vec, attn_core_dict = abs_attn_core(
-        q_head, k_head, v_head, attn_mask, dropatt, is_training, scale)
+        q_head, k_head, v_head, attn_mask, dropatt, is_training, scale,
+        attn_bias)
 
     # post processing
     output, post_dict = post_attention(
