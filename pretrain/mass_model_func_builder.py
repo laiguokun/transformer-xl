@@ -3,9 +3,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
-import math
-
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
@@ -16,15 +13,16 @@ try:
   import google3.experimental.users.zihangd.pretrain.model as model
   from google3.experimental.users.zihangd.pretrain.common_ops import causal_attn_mask
   from google3.experimental.users.zihangd.pretrain.model_utils import \
-    _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      _get_initializer, _get_inp_func, _get_tfm_func, \
+      bf16_decorator
 except ImportError:
   import model
   from common_ops import causal_attn_mask
   from model_utils import _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      bf16_decorator
 
 FLAGS = flags.FLAGS
+
 
 @bf16_decorator
 def mass_loss(features, labels, mems, n_token, is_training):

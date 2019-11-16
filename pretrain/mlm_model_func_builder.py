@@ -3,9 +3,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
-import math
-
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
@@ -14,17 +11,67 @@ import tensorflow as tf
 # pylint: disable=g-import-not-at-top
 try:
   import google3.experimental.users.zihangd.pretrain.model as model
-  from google3.experimental.users.zihangd.pretrain.common_ops import causal_attn_mask
   from google3.experimental.users.zihangd.pretrain.model_utils import \
-    _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      _get_initializer, _get_inp_func, _get_tfm_func, bf16_decorator
 except ImportError:
   import model
-  from common_ops import causal_attn_mask
   from model_utils import _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      bf16_decorator
 
 FLAGS = flags.FLAGS
+
+
+@bf16_decorator
+def get_lm_loss(features, mems, n_token, is_training):
+  """LM loss."""
+  del mems
+
+  initializer = _get_initializer()
+
+  #### Unpack input
+  inputs = features["inputs"]
+  target = features["target"]
+  type_id = features["type_id"]
+
+  monitor_dict = {}
+
+  #### Transformer Model
+  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
+    inp_func = _get_inp_func(n_token,
+                             FLAGS.d_model,
+                             initializer,
+                             is_training)
+    input_embed, word_embed_table = inp_func(
+        inputs=inputs, type_id=type_id, return_embed_table=True)
+
+    tfm_func = _get_tfm_func(initializer,
+                             is_training,
+                             phase="pretrain")
+    output, _ = tfm_func(
+        inputs=input_embed,
+        input_mask=None,
+        perm_mask=None,
+        causal=True)
+
+    lm_loss, _ = model.lm_loss(
+        hidden=output,
+        target=target,
+        n_token=n_token,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        lookup_table=word_embed_table,
+        tie_weight=FLAGS.tie_weight,
+        return_logits=False,
+        use_tpu=FLAGS.use_tpu)
+
+    if lm_loss.dtype != tf.float32:
+      lm_loss = tf.cast(lm_loss, tf.float32)
+
+    total_loss = tf.reduce_mean(lm_loss)
+
+    monitor_dict["lm_loss"] = total_loss
+
+  return total_loss, {}, monitor_dict
 
 
 @bf16_decorator
@@ -38,7 +85,6 @@ def mlm_loss(features, labels, mems, n_token, is_training):
   #### Unpack input
   masked_inp = features["masked_input"]
   type_id = features["type_id"]
-  # pos_seq = features["pos_seq"]
 
   target_mapping = features["target_mapping"]
   target_mask = features["target_mask"]
@@ -53,8 +99,7 @@ def mlm_loss(features, labels, mems, n_token, is_training):
                              initializer,
                              is_training)
     masked_embed, word_embed_table = inp_func(
-        inputs=masked_inp, type_id=type_id,  # pos_seq=pos_seq,
-        return_embed_table=True)
+        inputs=masked_inp, type_id=type_id, return_embed_table=True)
 
     tfm_func = _get_tfm_func(initializer,
                              is_training,
@@ -94,66 +139,11 @@ def mlm_loss(features, labels, mems, n_token, is_training):
 
 
 @bf16_decorator
-def get_lm_loss(features, mems, n_token, is_training):
-  """LM loss."""
-  del mems
-
-  initializer = _get_initializer()
-
-  #### Unpack input
-  inputs = features["inputs"]
-  target = features["target"]
-  type_id = features["type_id"]
-  # pos_seq = features["pos_seq"]
-
-  monitor_dict = {}
-
-  #### Transformer Model
-  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
-    inp_func = _get_inp_func(n_token,
-                             FLAGS.d_model,
-                             initializer,
-                             is_training)
-    input_embed, word_embed_table = inp_func(
-        inputs=inputs, type_id=type_id,  # pos_seq=pos_seq,
-        return_embed_table=True)
-
-    tfm_func = _get_tfm_func(initializer,
-                             is_training,
-                             phase="pretrain")
-    output, _ = tfm_func(
-        inputs=input_embed,
-        input_mask=None,
-        perm_mask=None,
-        causal=True)
-
-    lm_loss, _ = model.lm_loss(
-        hidden=output,
-        target=target,
-        n_token=n_token,
-        d_model=FLAGS.d_model,
-        initializer=initializer,
-        lookup_table=word_embed_table,
-        tie_weight=FLAGS.tie_weight,
-        return_logits=False,
-        use_tpu=FLAGS.use_tpu)
-
-    if lm_loss.dtype != tf.float32:
-      lm_loss = tf.cast(lm_loss, tf.float32)
-
-    total_loss = tf.reduce_mean(lm_loss)
-
-    monitor_dict["lm_loss"] = total_loss
-
-  return total_loss, {}, monitor_dict
-
-
-@bf16_decorator
 def electra_loss(features, labels, mems, n_token, is_training):
-  """DAE loss with generator."""
+  """Electra loss with generator."""
   del mems
   del labels
-  
+
   assert FLAGS.ins_ratio + FLAGS.del_ratio == 0.0
 
   initializer = _get_initializer()
@@ -170,11 +160,6 @@ def electra_loss(features, labels, mems, n_token, is_training):
   edit_label = features["enc_edit_label"]
 
   initializer = _get_initializer()
-
-  if FLAGS.use_bfloat16:
-    tf_float = tf.bfloat16
-  else:
-    tf_float = tf.float32
 
   #### Shared input embedding (for generator)
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
@@ -235,12 +220,12 @@ def electra_loss(features, labels, mems, n_token, is_training):
   #### get the mask for generated same token as the target
   same_mask = tf.equal(gen_tokens, gen_tgt)
   same_mask = tf.cast(same_mask, gen_tgt_mask.dtype) * gen_tgt_mask
-  
+
   # monitor how many generated tokens are the same as the real ones
   same_prec = (tf.reduce_sum(same_mask)
                / tf.reduce_sum(gen_tgt_mask))
   monitor_dict["same_percent"] = same_prec
-  
+
   # If same, change the edit_label to original (0)
   same_mask_full = tf.einsum("bi,bil->bl", same_mask, gen_mask_map)
   edit_label = tf.where(
@@ -300,5 +285,5 @@ def electra_loss(features, labels, mems, n_token, is_training):
     total_loss = FLAGS.edit_weight * edit_loss
 
     monitor_dict["edit_loss"] = total_loss
-    
+
   return total_loss, {}, monitor_dict

@@ -3,9 +3,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
-import math
-
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 
@@ -16,15 +13,16 @@ try:
   import google3.experimental.users.zihangd.pretrain.model as model
   from google3.experimental.users.zihangd.pretrain.common_ops import causal_attn_mask
   from google3.experimental.users.zihangd.pretrain.model_utils import \
-    _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      _get_initializer, _get_inp_func, _get_tfm_func, \
+      extract_hiddens, bf16_decorator
 except ImportError:
   import model
   from common_ops import causal_attn_mask
   from model_utils import _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      extract_hiddens, bf16_decorator
 
 FLAGS = flags.FLAGS
+
 
 @bf16_decorator
 def dae_loss(features, labels, mems, n_token, is_training):
@@ -264,7 +262,7 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
 
   enc_mask = features["enc_mask"]
   enc_type = features["enc_type"]
-  enc_edit_label = features["enc_edit_label"]
+  # enc_edit_label = features["enc_edit_label"]
 
   dec_inp = features["dec_inp"]
   dec_tgt = features["dec_tgt"]
@@ -277,7 +275,7 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
   rep_enc2dec_full = features["rep_enc2dec_full"]
   rep_enc2dec_part = features["rep_enc2dec_part"]
 
-  enc_pos= features["enc_pos"]
+  enc_pos = features["enc_pos"]
   dec_pos = features["dec_pos"]
 
   if FLAGS.double_type:
@@ -351,12 +349,12 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
   same_mask = tf.equal(gen_tokens, gen_tgt)
   same_mask = (tf.cast(same_mask, rep_enc2dec_full.dtype) *
                tf.cast(gen_tgt_mask, rep_enc2dec_full.dtype))
-  
+
   # monitor how many generated tokens are the same as the real ones
   same_prec = (tf.reduce_sum(tf.cast(same_mask, gen_tgt_mask.dtype))
                / tf.reduce_sum(gen_tgt_mask))
   monitor_dict["same_percent"] = same_prec
-  
+
   # If same, change the edit_label to original (0)
   dec_same_mask_full = tf.einsum("bi,bil->bl", same_mask, rep_enc2dec_full)
   edit_label = tf.where(
@@ -368,7 +366,6 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
   dec_same_mask_part = tf.einsum("bi,bij->bj", same_mask, rep_enc2dec_part)
   dec_diff_mask_part = 1.0 - tf.cast(dec_same_mask_part, dec_lm_tgt_mask.dtype)
   dec_lm_tgt_mask = dec_lm_tgt_mask * dec_diff_mask_part
-
 
   # shapes
   bsz = tf.shape(enc_inp)[0]
@@ -411,22 +408,11 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
   perm_mask = tf.concat([src_mask, tgt_mask], axis=1)
   perm_mask = tf.cast(perm_mask, tf_float)
 
-  # padding
-  non_pad_mask = tf.not_equal(target_seg, 0)
-  all_eos = tf.constant(FLAGS.eos_id, shape=dec_tgt.shape, dtype=dec_tgt.dtype)
-  # Replace all <pad> (/P) with <eos> (/S)
-  #   - target : /S a1 a2 a3 /S b1 b2 /S c1 c2 /P /P
-  #   - tmptgt : /S a1 a2 a3 /S b1 b2 /S c1 c2 /S /S
-  tmptgt = tf.where(non_pad_mask, dec_tgt, all_eos)
-  # Shift the `tmptgt` to form the (next-step) prediction target
-  #   - target   : \S a1 a2 a3 \S b1 b2 \S c1 c2 \P \P
-  #   - pred_tgt : a1 a2 a3 \S b1 b2 \S c1 c2 \S \S \S
-  pred_tgt = tf.concat([tmptgt[:, 1:], tmptgt[:, :1]], axis=1)
-  loss_mask = tf.cast(non_pad_mask, tf.float32)
-
+  ##### Position sequence
   pos_seq = tf.concat([enc_pos, dec_pos], axis=1)
-  total_loss = 0
+
   #### Transformer Model
+  total_loss = 0
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
     input_embed = inp_func(inputs=inputs, pos_seq=pos_seq, type_id=type_id)
     tfm_func = _get_tfm_func(initializer,
@@ -498,13 +484,13 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
         tie_weight=FLAGS.tie_weight,
         target_mapping=None,
         hidden_mapping=dec_mask_map,
-        use_tpu=FLAGS.use_tpu)      
+        use_tpu=FLAGS.use_tpu)
 
     if lm_loss.dtype != tf.float32:
       lm_loss = tf.cast(lm_loss, tf.float32)
     dec_lm_tgt_mask = tf.cast(dec_lm_tgt_mask, lm_loss.dtype)
     lm_loss = (tf.reduce_sum(lm_loss * dec_lm_tgt_mask) /
-                tf.reduce_sum(dec_lm_tgt_mask))
+               tf.reduce_sum(dec_lm_tgt_mask))
 
     if FLAGS.lm_weight > 0:
       # monitor
@@ -512,6 +498,5 @@ def dae_joint_loss(features, labels, mems, n_token, is_training):
 
       # accumulate total loss
       total_loss += FLAGS.lm_weight * lm_loss
-
 
   return total_loss, {}, monitor_dict

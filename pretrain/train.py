@@ -166,7 +166,7 @@ def get_model_fn(n_token):
         idx += 1
 
     #### Get loss from inputs
-    total_loss, new_mems, monitor_dict = model_func_builder.get_loss(
+    total_loss, new_mems, monitor_dict = model_func_builder.mlm_loss(
         features, labels, mems, n_token, is_training)
 
     #### Turn `new_mems` into `new_cache`

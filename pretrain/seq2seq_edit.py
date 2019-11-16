@@ -70,7 +70,7 @@ def add_edit_noise_to_sample(
   n_ops = int(seq_len * ops_ratio)
   n_add_ops, n_del_ops, n_rep_ops = get_ops_num(
     n_ops, add_ratio, del_ratio, rep_ratio)
-  
+
   label_decoder = np.zeros(seq_len, dtype=int)
   label_encoder = np.zeros(seq_len, dtype=int)
   x_decoder = x

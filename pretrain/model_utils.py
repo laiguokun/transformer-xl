@@ -4,19 +4,22 @@ from __future__ import division
 from __future__ import print_function
 
 import collections
+import functools
 import re
+
 from absl import flags
 import absl.logging as _logging  # pylint: disable=unused-import
 import tensorflow as tf
-import functools
-import math
 
+# pylint: disable=g-import-not-at-top
 try:
   import google3.experimental.users.zihangd.pretrain.model as model
 except ImportError:
   import model
+# pylint: enable=g-import-not-at-top
 
 FLAGS = flags.FLAGS
+
 
 def get_assignment_map_from_checkpoint(tvars, init_checkpoint):
   """Compute the union of the current variables and checkpoint variables."""
@@ -86,6 +89,7 @@ def construct_scalar_host_call(
 
   return host_call_fn, [global_step_tensor] + other_tensors
 
+
 def bf16_decorator(func):
   @functools.wraps(func)
   def wrapped_func(*args, **kwargs):
@@ -97,7 +101,7 @@ def bf16_decorator(func):
 
   return wrapped_func
 
-  
+
 def _get_initializer():
   """Get variable intializer."""
   tf.logging.info("Using %s initializer", FLAGS.init)
@@ -122,7 +126,7 @@ def _get_initializer():
 def _get_inp_func(n_token, d_embed, initializer, is_training, **kwargs):
   """Prepare input function."""
   if FLAGS.double_type:
-    n_type = FLAGS.n_type * 2 
+    n_type = FLAGS.n_type * 2
   else:
     n_type = FLAGS.n_type
   if FLAGS.input_proc == "inv_sqrt":
@@ -195,13 +199,6 @@ def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
       **tfm_args)
 
   return tfm_func
-
-def get_loss(features, labels, mems, n_token, is_training):
-  """Loss selector."""
-  if FLAGS.loss_type == "mlm":
-    return mlm_loss(features, labels, mems, n_token, is_training)
-  else:
-    raise NotImplementedError
 
 
 def extract_hiddens(inputs, type_id, n_token, is_training):

@@ -3,7 +3,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import functools
 import math
 
 from absl import flags
@@ -16,15 +15,17 @@ try:
   import google3.experimental.users.zihangd.pretrain.model as model
   from google3.experimental.users.zihangd.pretrain.common_ops import causal_attn_mask
   from google3.experimental.users.zihangd.pretrain.model_utils import \
-    _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      _get_initializer, _get_inp_func, _get_tfm_func, \
+      bf16_decorator
 except ImportError:
   import model
   from common_ops import causal_attn_mask
   from model_utils import _get_initializer, _get_inp_func, _get_tfm_func, \
-    get_loss, extract_hiddens, bf16_decorator
+      bf16_decorator
+
 
 FLAGS = flags.FLAGS
+
 
 @bf16_decorator
 def joint_loss(features, labels, n_token, is_training):
@@ -42,7 +43,6 @@ def joint_loss(features, labels, n_token, is_training):
   target_pos = features["target_position"]
   target_seg = features["target_segmentation"]
 
-
   # shapes
   bsz = tf.shape(source)[0]
   src_len = tf.shape(source)[1]
@@ -52,13 +52,13 @@ def joint_loss(features, labels, n_token, is_training):
     tf_float = tf.bfloat16
   else:
     tf_float = tf.float32
-    
-  ##### format inputs
+
+    ##### format inputs
   inputs = tf.concat([source, target], axis=1)
   position = tf.concat([source_pos, target_pos], axis=1)
 
   src_type_id = features.get(
-      "source_type", 
+      "source_type",
       tf.zeros([bsz, src_len], dtype=inputs.dtype))
   tgt_type_id = features.get(
       "target_type",
@@ -91,7 +91,7 @@ def joint_loss(features, labels, n_token, is_training):
   tgt_to_tgt = tf.logical_or(
       tgt_to_tgt,
       causal_mask
-  )
+      )
   tgt_mask = tf.concat([tgt_to_src, tgt_to_tgt], axis=2)
 
   # concat
@@ -152,7 +152,7 @@ def joint_loss(features, labels, n_token, is_training):
     total_loss = tf.reduce_sum(lm_loss * loss_mask) / num_loss
     nll = tf.reduce_sum(nll_loss * loss_mask) / num_loss
 
-  # To be compatible with fairseq, convert to base 2 for logging
+    # To be compatible with fairseq, convert to base 2 for logging
   monitor_dict = {
       "loss": total_loss / math.log(2),
       "nll": nll / math.log(2),
@@ -189,11 +189,11 @@ def encdec_loss(features, labels, n_token, is_training):
     tf_float = tf.float32
 
   source_type = features.get(
-    "source_type", 
-    tf.zeros([bsz, src_len], dtype=source.dtype))
+      "source_type",
+      tf.zeros([bsz, src_len], dtype=source.dtype))
   target_type = features.get(
-    "target_type",
-    tf.ones([bsz, tgt_len], dtype=target.dtype))
+      "target_type",
+      tf.ones([bsz, tgt_len], dtype=target.dtype))
 
   ##### attention mask: note that `1` indicates CANNOT attend
   # src-src mask
