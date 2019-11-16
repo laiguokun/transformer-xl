@@ -127,7 +127,8 @@ flags.DEFINE_bool("tie_weight", default=True,
 flags.DEFINE_bool("attn_to_mask", default=True,
                   help="For MLM loss, whether to allow model to attend "
                   "the positions with [mask] tokens.")
-
+flags.DEFINE_bool("electra", default=False,
+                  help="whether to use electra loss func")
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
                   help="Whether to use bfloat16.")
@@ -168,8 +169,12 @@ def get_model_fn(n_token):
         idx += 1
 
     #### Get loss from inputs
-    total_loss, new_mems, monitor_dict = model_func_builder.mlm_loss(
-        features, labels, mems, n_token, is_training)
+    if FLAGS.electra:
+      total_loss, new_mems, monitor_dict = model_func_builder.electra_loss(
+          features, labels, mems, n_token, is_training)      
+    else:
+      total_loss, new_mems, monitor_dict = model_func_builder.mlm_loss(
+          features, labels, mems, n_token, is_training)
 
     #### Turn `new_mems` into `new_cache`
     new_cache = []

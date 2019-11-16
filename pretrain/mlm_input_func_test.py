@@ -33,7 +33,7 @@ flags.DEFINE_integer("seq_len", default=512,
 flags.DEFINE_string("split", default="train",
                     help="Data split.")
 flags.DEFINE_integer("num_core_per_host", default=16, help="num core per host")
-flags.DEFINE_integer("num_predict", default=80,
+flags.DEFINE_integer("num_predict", default=10,
                      help="Num of position to predict.")
 flags.DEFINE_integer("num_example", default=2,
                      help="Num of examples to see.")
@@ -76,17 +76,17 @@ def main(unused_argv):
       for k, v in example_np.items():
         if v.ndim == 2:
           for i in range(v.shape[0]):
-            if k in ["masked_input"]:
-              print(tokenizer.convert_ids_to_text(v[i].tolist()))
+            if k in ["masked_input", "inputs"]:
+              print(k, tokenizer.convert_ids_to_text(v[i].tolist()))
             elif k in ["type_id"]:
-              print(" ".join([str(j) for j in v[i].tolist()]))
+              print(k, " ".join([str(j) for j in v[i].tolist()]))
             # else:
             #   print(v[i].tolist())
         else:
-          if k in ["masked_input"]:
-            print(tokenizer.convert_ids_to_text(v.tolist()))
+          if k in ["masked_input", "inputs"]:
+            print(k, tokenizer.convert_ids_to_text(v.tolist()))
           elif k in ["type_id"]:
-            print(" ".join([str(j) for j in v.tolist()]))
+            print(k, " ".join([str(j) for j in v.tolist()]))
           # else:
           #   print(v.tolist())
 

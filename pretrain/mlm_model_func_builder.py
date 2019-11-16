@@ -140,27 +140,31 @@ def mlm_loss(features, labels, mems, n_token, is_training):
 
 @bf16_decorator
 def electra_loss(features, labels, mems, n_token, is_training):
-  """Electra loss with generator."""
+  """Electra Loss"""
   del mems
   del labels
-
-  assert FLAGS.ins_ratio + FLAGS.del_ratio == 0.0
 
   initializer = _get_initializer()
   monitor_dict = {}
 
-  ##### unpack input
-  gen_inp = features["gen_inp"]
-  gen_tgt = features["gen_tgt"]
-  gen_mask_map = features["gen_mask_map"]
-  gen_tgt_mask = features["gen_tgt_mask"]
+  #### Unpack input
+  original_inp = features["inputs"]
+  masked_inp = features["masked_input"]
+  type_id = features["type_id"]
 
-  enc_mask = features["enc_mask"]
-  enc_type = features["enc_type"]
-  edit_label = features["enc_edit_label"]
+  target_mapping = features["target_mapping"]
+  target_mask = features["target_mask"]
+  target = features["target"]
 
   initializer = _get_initializer()
 
+  if FLAGS.use_bfloat16:
+    tf_float = tf.bfloat16
+  else:
+    tf_float = tf.float32
+
+  gen_inp = masked_inp
+  enc_type = type_id
   #### Shared input embedding (for generator)
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
     inp_func = _get_inp_func(n_token,
@@ -178,27 +182,26 @@ def electra_loss(features, labels, mems, n_token, is_training):
                                  shrink=FLAGS.gen_shrink)
     gen_output, _ = gen_tfm_func(
         inputs=gen_embed,
-        input_mask=enc_mask,
+        input_mask=None,
         perm_mask=None)
 
     gen_lm_loss, _, logits = model.lm_loss(
         hidden=gen_output,
-        target=gen_tgt,
+        target=target,
         n_token=n_token,
         d_model=FLAGS.d_model,
         initializer=initializer,
         lookup_table=shared_embed_table,
         tie_weight=FLAGS.tie_weight,
         target_mapping=None,
-        hidden_mapping=gen_mask_map,
+        hidden_mapping=target_mapping,
         return_logits=True,
         use_tpu=FLAGS.use_tpu)
 
+    assert FLAGS.sample_strategy != "token_span"
     if gen_lm_loss.dtype != tf.float32:
       gen_lm_loss = tf.cast(gen_lm_loss, tf.float32)
-    gen_tgt_mask = tf.cast(gen_tgt_mask, gen_lm_loss.dtype)
-    gen_loss = (tf.reduce_sum(gen_lm_loss * gen_tgt_mask) /
-                tf.reduce_sum(gen_tgt_mask))
+    gen_loss = tf.reduce_mean(gen_lm_loss)
     monitor_dict["gen_loss"] = gen_loss
 
     total_loss = gen_loss
@@ -213,26 +216,16 @@ def electra_loss(features, labels, mems, n_token, is_training):
   # map `num_predict` samples to full length
   samples = tf.einsum("bm,bml->bl",
                       tf.cast(samples, tf.float32),
-                      tf.cast(gen_mask_map, tf.float32))
+                      tf.cast(target_mapping, tf.float32))
   samples = tf.cast(samples, tf.int32)
   enc_inp = tf.where(tf.equal(gen_inp, FLAGS.mask_id), samples, gen_inp)
 
-  #### get the mask for generated same token as the target
-  same_mask = tf.equal(gen_tokens, gen_tgt)
-  same_mask = tf.cast(same_mask, gen_tgt_mask.dtype) * gen_tgt_mask
-
-  # monitor how many generated tokens are the same as the real ones
-  same_prec = (tf.reduce_sum(same_mask)
-               / tf.reduce_sum(gen_tgt_mask))
+  is_same = tf.cast(tf.equal(enc_inp, original_inp), tf.int32)
+  is_mask = tf.cast(tf.equal(gen_inp, FLAGS.mask_id), tf.int32)
+  same_prec = tf.reduce_sum(is_same) / tf.reduce_sum(is_mask)
   monitor_dict["same_percent"] = same_prec
 
-  # If same, change the edit_label to original (0)
-  same_mask_full = tf.einsum("bi,bil->bl", same_mask, gen_mask_map)
-  edit_label = tf.where(
-      tf.cast(same_mask_full, tf.bool),
-      tf.zeros(tf.shape(same_mask_full), dtype=edit_label.dtype),
-      edit_label)
-
+  edit_label = is_same
   #### Transformer Model
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
     inp_embed = inp_func(inputs=enc_inp, type_id=enc_type)
@@ -249,7 +242,7 @@ def electra_loss(features, labels, mems, n_token, is_training):
     edit_loss, edit_logits = model.cls_loss(
         hidden=output,
         target=edit_label,
-        n_cls=4,
+        n_cls=2,
         d_model=FLAGS.d_model,
         initializer=initializer,
         target_mapping=None,
@@ -257,33 +250,19 @@ def electra_loss(features, labels, mems, n_token, is_training):
         return_logits=True,
         scope="edit_type_loss")
 
-    tgt_mask = tf.cast(1.0 - enc_mask, tf.float32)
-    edit_loss = (tf.reduce_sum(edit_loss * tgt_mask) /
-                 tf.reduce_sum(tgt_mask))
+    edit_loss = tf.reduce_mean(edit_loss)
 
     edit_pred = tf.cast(tf.argmax(edit_logits, axis=-1), dtype=edit_label.dtype)
     edit_corr = tf.cast(tf.equal(edit_pred, edit_label), dtype=tf.float32)
-    edit_accu = (tf.reduce_sum(edit_corr * tgt_mask) /
-                 tf.reduce_sum(tgt_mask))
+    edit_accu = tf.reduce_mean(edit_corr)
 
     # monitor
     monitor_dict["edit_loss"] = edit_loss
     monitor_dict["accu_edit"] = edit_accu
 
-    def get_class_acc(label_id):
-      mask = tf.ones(tf.shape(edit_label), dtype=edit_label.dtype) * label_id
-      mask = tf.equal(edit_label, mask)
-      mask = tf.cast(mask, dtype=tgt_mask.dtype) * tgt_mask
-      accu = tf.reduce_sum(edit_corr * mask) / tf.reduce_sum(mask)
-      return accu
-
-    monitor_dict["accu_orig"] = get_class_acc(0)
-    if FLAGS.del_ratio > 0:
-      monitor_dict["accu_del"] = get_class_acc(FLAGS.del_label)
-
     # accumulate total loss
-    total_loss = FLAGS.edit_weight * edit_loss
+    total_loss = edit_loss
 
     monitor_dict["edit_loss"] = total_loss
-
+    
   return total_loss, {}, monitor_dict

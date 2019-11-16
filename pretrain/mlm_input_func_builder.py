@@ -187,7 +187,7 @@ def create_target_mapping(example, is_masked, seq_len, num_predict,
 
 def create_mlm_target(example, seq_len, num_predict, use_bfloat16):
   """docs."""
-  inputs = example.pop("inputs")
+  inputs = example["inputs"]
 
   # sample mask
   is_masked = online_sample_masks(
