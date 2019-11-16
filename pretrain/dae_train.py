@@ -150,11 +150,8 @@ flags.DEFINE_float("lm_weight", default=1,
                    help="Weight to the decoder lm loss.")
 flags.DEFINE_bool("mask_edited_only", default=True,
                   help="only calc the decoder lm loss at edited pos")
-flags.DEFINE_string("loss_func", default="encdec",
-                    help="This argument has 3 options:"
-                    "enc-dec: the normal encoder-decoder pretrain"
-                    "electra: electra loss, del_ratio=ins_ratio=0 in this case"
-                    "joint: joint model pretrain")
+flags.DEFINE_bool("joint", default=False,
+                  help="Whether to joint model or enc-dec model")
 
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
@@ -196,18 +193,12 @@ def get_model_fn(n_token):
         idx += 1
 
     #### Get loss from inputs
-    if FLAGS.loss_func == "encdec":
-      total_loss, new_mems, monitor_dict = model_func_builder.dae_loss(
-          features, labels, mems, n_token, is_training)
-    elif FLAGS.loss_func == "electra":
-      assert FLAGS.ins_ratio + FLAGS.del_ratio == 0.
-      total_loss, new_mems, monitor_dict = model_func_builder.electra_loss(
-          features, labels, mems, n_token, is_training)
-    elif FLAGS.loss_func == "joint":
+    if FLAGS.joint:
       total_loss, new_mems, monitor_dict = model_func_builder.dae_joint_loss(
           features, labels, mems, n_token, is_training)
     else:
-      assert False
+      total_loss, new_mems, monitor_dict = model_func_builder.dae_loss(
+          features, labels, mems, n_token, is_training)    
     #### Turn `new_mems` into `new_cache`
     new_cache = []
     for obj_len, key in zip([FLAGS.seq_len], ["mems"]):
