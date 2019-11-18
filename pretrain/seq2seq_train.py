@@ -152,7 +152,10 @@ def get_model_fn(n_token):
 
     #### Get loss from inputs
     if FLAGS.seq2seq_type == "dec_only":
-      seq2seq_loss = model_func_builder.joint_loss
+      if FLAGS.rel_attn:
+        seq2seq_loss = model_func_builder.joint_rel_attn_loss
+      else:
+        seq2seq_loss = model_func_builder.joint_loss
     elif FLAGS.seq2seq_type == "encdec":
       seq2seq_loss = model_func_builder.encdec_loss
     else:

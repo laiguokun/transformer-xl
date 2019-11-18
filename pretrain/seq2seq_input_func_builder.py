@@ -138,6 +138,108 @@ def run_preprocess(dataset, interleave=True):
   return dataset
 
 
+def reorder_dataset(dataset, max_length):
+  def reorder(example):
+    # using this for debug
+    #ret = example
+    ret = {}
+    src = example["source"]
+    tgt = example["target"]
+    src_seg = example["source_segmentation"]
+    tgt_seg = example["target_segmentation"]
+    src_pos = example["source_position"]
+    tgt_pos = example["target_position"]
+    #segment_num = max_length // 2
+    segment_num = tf.reduce_max(src_seg) + 1
+    src_seg_cnt = tf.reduce_sum(
+        tf.one_hot(src_seg, segment_num, dtype=tf.int32), axis=0)
+    tgt_seg_cnt = tf.reduce_sum(
+        tf.one_hot(tgt_seg, segment_num, dtype=tf.int32), axis=0)
+    max_seg_cnt = tf.math.maximum(src_seg_cnt, tgt_seg_cnt)
+    # remove cnt of 0 seg
+    max_seg_cnt = tf.tensor_scatter_nd_update(
+        max_seg_cnt,
+        indices=tf.constant([0], tf.int32)[:, None],
+        updates=tf.constant([0], max_seg_cnt.dtype)
+    )
+    max_seg_cnt = max_seg_cnt * 2
+    seg_start_idx = tf.cumsum(max_seg_cnt, exclusive=True)
+    seg_end_idx = tf.cumsum(max_seg_cnt)
+    is_valid = tf.cumsum(max_seg_cnt) <= max_length
+    max_valid_seg = tf.reduce_sum(tf.cast(is_valid, tf.int32))
+    valid_src_mask = tf.logical_and(src_seg > 0, src_seg < max_valid_seg)
+    valid_tgt_mask = tf.logical_and(tgt_seg > 0, tgt_seg < max_valid_seg)
+
+    # even pos is source, odd pos is target
+    src_valid = tf.boolean_mask(src, valid_src_mask)
+    src_valid_seg = tf.boolean_mask(src_seg, valid_src_mask)
+    src_valid_pos = tf.boolean_mask(src_pos * 2, valid_src_mask)
+    tgt_valid = tf.boolean_mask(tgt, valid_tgt_mask)
+    tgt_valid_seg = tf.boolean_mask(tgt_seg, valid_tgt_mask)
+    tgt_valid_pos = tf.boolean_mask(tgt_pos * 2 + 1, valid_tgt_mask)
+
+    src_map = tf.one_hot(src_valid_seg, segment_num, dtype=tf.int32)
+    src_seg_shift = tf.einsum('s,ls->l', seg_start_idx, src_map)
+    src_valid_pos += src_seg_shift
+    tgt_map = tf.one_hot(tgt_valid_seg, segment_num, dtype=tf.int32)
+    tgt_seg_shift = tf.einsum('s,ls->l', seg_start_idx, tgt_map)
+    tgt_valid_pos += tgt_seg_shift
+
+    # get inputs
+    inputs = tf.scatter_nd(
+        shape=[max_length],
+        indices=src_valid_pos[:, None],
+        updates=src_valid)
+    inputs = tf.tensor_scatter_nd_update(
+        inputs,
+        indices=tgt_valid_pos[:, None],
+        updates=tgt_valid)
+
+    # get targets
+    targets = tgt * tf.cast(valid_tgt_mask, dtype=tgt.dtype)
+    targets = tf.concat([targets[1:], targets[:1]], axis=0)
+    non_pad_mask = tf.not_equal(targets, 0)
+    all_eos = tf.constant(FLAGS.eos_id, shape=targets.shape, dtype=targets.dtype)
+    targets = tf.where(non_pad_mask, targets, all_eos)
+  
+    loss_mask = tf.cast(non_pad_mask, tf.float32)
+
+    # get segmentation
+    seg_start_idx_valid = seg_start_idx[1:max_valid_seg]
+    seg_end_idx_valid = seg_end_idx[1:max_valid_seg]
+    seg = tf.scatter_nd(
+        shape=[max_length],
+        indices=seg_start_idx_valid[:, None],
+        updates=tf.ones(shape=[max_valid_seg - 1]))
+    seg = tf.cumsum(seg)
+    pad_len = max_length - seg_end_idx_valid[-1]
+    seg = tf.tensor_scatter_nd_update(
+        seg,
+        indices=tf.range(seg_end_idx_valid[-1], max_length)[:, None],
+        updates=tf.zeros(shape=[pad_len])
+    )
+    seg = tf.cast(seg, tf.int32)
+
+    seg_map = tf.one_hot(seg, segment_num, dtype=tf.int32)
+    seg_pos_shift = tf.einsum('s,ls->l', seg_start_idx, seg_map)
+    
+    # get position
+    pos = tf.cumsum(tf.ones(shape=[max_length], dtype=tf.int32), exclusive=True)
+    pos = pos - seg_pos_shift
+    pos = tf.tensor_scatter_nd_update(
+        pos,
+        indices=tf.range(seg_end_idx_valid[-1], max_length)[:, None],
+        updates=tf.zeros(shape=[pad_len], dtype=pos.dtype)
+    )
+    pos = tf.cast(pos, tf.int32)
+    ret["inputs"] = inputs
+    ret["targets"] = targets
+    ret["loss_mask"] = loss_mask
+    ret["segmentation"] = seg
+    ret["position"] = pos
+    return ret
+  return dataset.map(reorder)
+
 def get_dataset(params,
                 num_hosts,
                 data_files,
@@ -201,9 +303,15 @@ def get_dataset(params,
 
   ##### IMPORTANT #####
   if FLAGS.pack_dataset:
-    dataset = pack_dataset(
-        dataset, max_length, keys=["source", "target"],
-        use_custom_ops=FLAGS.use_custom_ops)
+    if FLAGS.seq2seq_type == "dec_only" and FLAGS.rel_attn:
+      dataset = pack_dataset(
+          dataset, max_length // 2, keys=["source", "target"],
+          use_custom_ops=FLAGS.use_custom_ops)
+      dataset = reorder_dataset(dataset, max_length)
+    else:
+      dataset = pack_dataset(
+          dataset, max_length, keys=["source", "target"],
+          use_custom_ops=FLAGS.use_custom_ops)
   ##### IMPORTANT #####
 
   if prefetch_size:
@@ -293,7 +401,7 @@ def get_input_fn(
   tf.logging.info("Total number of batches: %d", record_info["num_example"])
   tf.logging.info("Total number of files: %d", len(record_info["filenames"]))
   tf.logging.debug(record_info["filenames"])
-
+  
   kwargs = dict(
       data_files=record_info["filenames"],
       num_hosts=num_hosts,

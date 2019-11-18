@@ -33,7 +33,10 @@ flags.DEFINE_integer("num_threads", default=1,
                      help="Num of passes to use.")
 flags.DEFINE_integer("num_example", default=1,
                      help="Num of examples to see.")
-
+flags.DEFINE_string("seq2seq_type", default="encdec",
+                    help="encdec or dec_only")
+flags.DEFINE_boolean("rel_attn", default=False,
+                     help="whether to use rel attention")
 FLAGS = flags.FLAGS
 
 
@@ -67,12 +70,12 @@ def main(unused_argv):
         print(k, v.shape)
         if v.ndim == 2:
           for i in range(v.shape[0]):
-            if k in ["source", "target"]:
+            if k in ["source", "target", "inputs", "targets"]:
               print(tokenizer.convert_ids_to_tokens(v[i].tolist()))
             else:
               print(v[i].tolist())
         else:
-          if k in ["source", "target"]:
+          if k in ["source", "target", "inputs", "targets"]:
             print(tokenizer.convert_ids_to_tokens(v.tolist()))
           else:
             print(v.tolist())
