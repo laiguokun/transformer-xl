@@ -90,7 +90,7 @@ def joint_loss(features, labels, n_token, is_training):
   # then the model should NOT attend
   tgt_to_tgt = tf.logical_or(
       tgt_to_tgt,
-      causal_mask) 
+      causal_mask)
   tgt_mask = tf.concat([tgt_to_src, tgt_to_tgt], axis=2)
 
   # concat
@@ -348,12 +348,12 @@ def joint_rel_attn_loss(features, labels, n_token, is_training):
   tgt_to_tgt = tf.logical_and(
       tf.logical_or(tgt_to_tgt, causal_mask),
       tf.logical_and(target_mask[None, :, None], target_mask[None, None, :]))
-  
+
   perm_mask = tf.logical_or(
       tf.logical_or(src_to_src, src_to_tgt),
       tf.logical_or(tgt_to_src, tgt_to_tgt))
   perm_mask = tf.cast(perm_mask, tf_float)
-  
+
   target_map = tf.one_hot(tf.range(1, seq_len, delta=2), seq_len)
 
   #### Transformer Model
@@ -387,7 +387,7 @@ def joint_rel_attn_loss(features, labels, n_token, is_training):
         lookup_table=word_embed_table,
         tie_weight=FLAGS.tie_weight,
         target_mapping=None,
-        hidden_mapping=target_map[None,:, :],
+        hidden_mapping=target_map[None, :, :],
         use_tpu=FLAGS.use_tpu)
 
     if lm_loss.dtype != tf.float32:

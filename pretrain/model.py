@@ -87,7 +87,7 @@ flags.DEFINE_integer("mem_len", default=0,
                      help="Number of steps to cache")
 
 # Generator specific
-flags.DEFINE_integer("gen_shrink", default=4,
+flags.DEFINE_integer("gen_shrink", default=3,
                      help="Shrink the hidden dimension of the generator.")
 
 # joint model pretrain specific
@@ -366,7 +366,7 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
 
 def cls_loss(hidden, target, n_cls, d_model, initializer, hidden_mapping=None,
              target_mapping=None, return_logits=False, use_tpu=False,
-             scope="cls_loss", reuse=False):
+             use_proj=False, scope="cls_loss", reuse=False):
   """Compute classification cross entropy loss."""
 
   tf.logging.info("===== Language model loss =====")
@@ -379,6 +379,14 @@ def cls_loss(hidden, target, n_cls, d_model, initializer, hidden_mapping=None,
 
   if target_mapping is not None:
     target = tf.einsum("bl,bml->bm", target, target_mapping)
+
+  if use_proj or hidden.shape.as_list()[-1] != d_model:
+    with tf.variable_scope("cls_proj"):
+      hidden = tf.layers.dense(
+          hidden,
+          units=d_model,
+          activation=get_activation(FLAGS.ff_activation),
+          kernel_initializer=initializer)
 
   with tf.variable_scope(scope, reuse=reuse):
     softmax_w = tf.get_variable("weight", [n_cls, d_model],
@@ -480,6 +488,56 @@ def lm_loss(hidden, target, n_token, d_model, initializer, lookup_table=None,
       return loss, nll, logits
     else:
       return loss, nll
+
+
+def binary_loss(hidden, target, d_model, initializer, hidden_mapping=None,
+                target_mapping=None, reuse=False):
+  """Compute language modeling cross entropy loss."""
+
+  tf.logging.info("===== Binary loss =====")
+  tf.logging.info("  - hidden_mapping %s", hidden_mapping)
+  tf.logging.info("  - target_mapping %s", target_mapping)
+  tf.logging.info("===============================")
+
+  if hidden_mapping is not None:
+    hidden = tf.einsum("bld,bml->bmd", hidden, hidden_mapping)
+
+  if target_mapping is not None:
+    target = tf.einsum("bl,bml->bm", target, target_mapping)
+
+  # Apply one more non-linear transformation before the output layer.
+  # This matrix is not used after pre-training.
+  with tf.variable_scope("binary_proj", reuse=reuse):
+    hidden = tf.layers.dense(
+        hidden,
+        units=d_model,
+        activation=get_activation(FLAGS.ff_activation),
+        kernel_initializer=initializer)
+    # (zihangd): electra removes this layer norm for unknown reason
+    # hidden = layer_norm(hidden, begin_norm_axis=-1, scope="LayerNorm")
+
+  with tf.variable_scope("binary_loss", reuse=reuse):
+    binary_w = tf.get_variable("weight", [d_model],
+                               dtype=hidden.dtype, initializer=initializer)
+
+    binary_b = tf.get_variable("bias", [1], dtype=hidden.dtype,
+                               initializer=tf.zeros_initializer())
+
+    logits = tf.einsum("bid,d->bi", hidden, binary_w) + binary_b
+    if logits.dtype != tf.float32:
+      # Always use float32 for loss
+      logits = tf.cast(logits, tf.float32)
+
+    target = tf.cast(target, dtype=logits.dtype)
+    loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=target,
+                                                   logits=logits)
+
+    # whether predictions are correct
+    prediction = tf.cast(logits > 0, target.dtype)
+    correct = tf.cast(tf.equal(prediction, target), tf.float32)
+
+  return loss, correct
+
 
 
 def summarize_sequence(summary_type, hidden, d_model, n_head, d_head, dropout,

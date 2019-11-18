@@ -21,7 +21,7 @@ try:
   import google3.experimental.users.zihangd.pretrain.model_utils as model_utils
   import google3.experimental.users.zihangd.pretrain.optimization as optimization
   import google3.experimental.users.zihangd.pretrain.tpu_estimator_new as tpu_estimator
-  import google3.experimental.users.zihangd.pretrain.model_func_builder as model_func_builder
+  import google3.experimental.users.zihangd.pretrain.mlm_model_func_builder as model_func_builder
   import google3.experimental.users.zihangd.pretrain.mlm_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 
@@ -31,7 +31,7 @@ except ImportError as e:
   import model_utils
   import optimization
   import tpu_estimator_new as tpu_estimator
-  import model_func_builder
+  import mlm_model_func_builder as model_func_builder
   import mlm_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 
@@ -127,8 +127,7 @@ flags.DEFINE_bool("tie_weight", default=True,
 flags.DEFINE_bool("attn_to_mask", default=True,
                   help="For MLM loss, whether to allow model to attend "
                   "the positions with [mask] tokens.")
-flags.DEFINE_bool("electra", default=False,
-                  help="whether to use electra loss func")
+
 ##### Precision
 flags.DEFINE_bool("use_bfloat16", default=False,
                   help="Whether to use bfloat16.")
@@ -169,12 +168,14 @@ def get_model_fn(n_token):
         idx += 1
 
     #### Get loss from inputs
-    if FLAGS.electra:
+    if FLAGS.loss_type == "electra":
       total_loss, new_mems, monitor_dict = model_func_builder.electra_loss(
-          features, labels, mems, n_token, is_training)      
-    else:
+          features, labels, mems, n_token, is_training)
+    elif FLAGS.loss_type == "mlm":
       total_loss, new_mems, monitor_dict = model_func_builder.mlm_loss(
           features, labels, mems, n_token, is_training)
+    else:
+      raise NotImplementedError
 
     #### Turn `new_mems` into `new_cache`
     new_cache = []

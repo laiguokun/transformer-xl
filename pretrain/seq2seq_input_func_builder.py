@@ -78,17 +78,9 @@ def decode_example(serialized_example):
   return dict(zip(decode_items, decoded))
 
 
-def pad_for_tpu(shapes_dict, max_length):
+def pad_for_tpu(shapes_dict, max_length, filler_len_dict=None):
   """Pads unknown features' dimensions for TPU."""
   padded_shapes = {}
-
-  def get_filler(specified_max_length):
-    if not specified_max_length:
-      return max_length
-    return min(specified_max_length, max_length)
-
-  source_none_filler = get_filler(FLAGS.max_src_len)
-  target_none_filler = get_filler(FLAGS.max_tgt_len)
 
   def pad_one_shape(shape, none_filler):
     return [
@@ -96,12 +88,12 @@ def pad_for_tpu(shapes_dict, max_length):
     ]
 
   for key, shape in six.iteritems(shapes_dict):
-    if key == "source":
-      padded_shapes[key] = pad_one_shape(shape, source_none_filler)
-    elif key == "target":
-      padded_shapes[key] = pad_one_shape(shape, target_none_filler)
+    if filler_len_dict is not None and key in filler_len_dict:
+      filler_length = min(filler_len_dict[key], max_length)
     else:
-      padded_shapes[key] = pad_one_shape(shape, max_length)
+      filler_length = max_length
+
+    padded_shapes[key] = pad_one_shape(shape, filler_length)
 
   return padded_shapes
 
@@ -141,7 +133,7 @@ def run_preprocess(dataset, interleave=True):
 def reorder_dataset(dataset, max_length):
   def reorder(example):
     # using this for debug
-    #ret = example
+    # ret = example
     ret = {}
     src = example["source"]
     tgt = example["target"]
@@ -149,13 +141,15 @@ def reorder_dataset(dataset, max_length):
     tgt_seg = example["target_segmentation"]
     src_pos = example["source_position"]
     tgt_pos = example["target_position"]
-    #segment_num = max_length // 2
+
+    # segment_num = max_length // 2
     segment_num = tf.reduce_max(src_seg) + 1
     src_seg_cnt = tf.reduce_sum(
         tf.one_hot(src_seg, segment_num, dtype=tf.int32), axis=0)
     tgt_seg_cnt = tf.reduce_sum(
         tf.one_hot(tgt_seg, segment_num, dtype=tf.int32), axis=0)
     max_seg_cnt = tf.math.maximum(src_seg_cnt, tgt_seg_cnt)
+
     # remove cnt of 0 seg
     max_seg_cnt = tf.tensor_scatter_nd_update(
         max_seg_cnt,
@@ -179,10 +173,10 @@ def reorder_dataset(dataset, max_length):
     tgt_valid_pos = tf.boolean_mask(tgt_pos * 2 + 1, valid_tgt_mask)
 
     src_map = tf.one_hot(src_valid_seg, segment_num, dtype=tf.int32)
-    src_seg_shift = tf.einsum('s,ls->l', seg_start_idx, src_map)
+    src_seg_shift = tf.einsum("s,ls->l", seg_start_idx, src_map)
     src_valid_pos += src_seg_shift
     tgt_map = tf.one_hot(tgt_valid_seg, segment_num, dtype=tf.int32)
-    tgt_seg_shift = tf.einsum('s,ls->l', seg_start_idx, tgt_map)
+    tgt_seg_shift = tf.einsum("s,ls->l", seg_start_idx, tgt_map)
     tgt_valid_pos += tgt_seg_shift
 
     # get inputs
@@ -199,9 +193,10 @@ def reorder_dataset(dataset, max_length):
     targets = tgt * tf.cast(valid_tgt_mask, dtype=tgt.dtype)
     targets = tf.concat([targets[1:], targets[:1]], axis=0)
     non_pad_mask = tf.not_equal(targets, 0)
-    all_eos = tf.constant(FLAGS.eos_id, shape=targets.shape, dtype=targets.dtype)
+    all_eos = tf.constant(FLAGS.eos_id, shape=targets.shape,
+                          dtype=targets.dtype)
     targets = tf.where(non_pad_mask, targets, all_eos)
-  
+
     loss_mask = tf.cast(non_pad_mask, tf.float32)
 
     # get segmentation
@@ -221,8 +216,8 @@ def reorder_dataset(dataset, max_length):
     seg = tf.cast(seg, tf.int32)
 
     seg_map = tf.one_hot(seg, segment_num, dtype=tf.int32)
-    seg_pos_shift = tf.einsum('s,ls->l', seg_start_idx, seg_map)
-    
+    seg_pos_shift = tf.einsum("s,ls->l", seg_start_idx, seg_map)
+
     # get position
     pos = tf.cumsum(tf.ones(shape=[max_length], dtype=tf.int32), exclusive=True)
     pos = pos - seg_pos_shift
@@ -237,8 +232,11 @@ def reorder_dataset(dataset, max_length):
     ret["loss_mask"] = loss_mask
     ret["segmentation"] = seg
     ret["position"] = pos
+
     return ret
+
   return dataset.map(reorder)
+
 
 def get_dataset(params,
                 num_hosts,
@@ -285,7 +283,7 @@ def get_dataset(params,
 
   # Create data-set from files by parsing, pre-processing and interleaving.
   if is_training:
-    cycle_length = min(8, len(data_files))
+    cycle_length = min(64, len(data_files))
     dataset = dataset.apply(
         tf.data.experimental.parallel_interleave(
             _load_records_and_preprocess,
@@ -304,10 +302,25 @@ def get_dataset(params,
   ##### IMPORTANT #####
   if FLAGS.pack_dataset:
     if FLAGS.seq2seq_type == "dec_only" and FLAGS.rel_attn:
+      def concat_src_tgt(example):
+        src = example.pop("source")
+        tgt = example.pop("target")
+        example["inputs"] = tf.concat([src, tgt], 0)
+        example["type_ids"] = tf.concat([
+            tf.zeros_like(src, dtype=src.dtype),
+            tf.ones_like(tgt, dtype=tgt.dtype)], 0)
+        return example
+      dataset = dataset.map(concat_src_tgt,
+                            num_parallel_calls=tf.data.experimental.AUTOTUNE)
       dataset = pack_dataset(
-          dataset, max_length // 2, keys=["source", "target"],
+          dataset, max_length, keys=["inputs", "type_ids"],
           use_custom_ops=FLAGS.use_custom_ops)
-      dataset = reorder_dataset(dataset, max_length)
+      def remove_auxiliary_structure(example):
+        example.pop("type_ids_segmentation")
+        example.pop("type_ids_position")
+        return example
+      dataset = dataset.map(remove_auxiliary_structure,
+                            num_parallel_calls=tf.data.experimental.AUTOTUNE)
     else:
       dataset = pack_dataset(
           dataset, max_length, keys=["source", "target"],
@@ -375,7 +388,7 @@ def get_input_fn(
     cur_record_info = {"num_example": 0, "filenames": []}
 
     for record_info_path in record_paths:
-      with tf.gfile.Open(record_info_path, "r") as fp:
+      with tf.io.gfile.GFile(record_info_path, "r") as fp:
         info = json.load(fp)
         cur_record_info["num_example"] += info["num_example"]
         cur_record_info["filenames"] += info["filenames"]
@@ -401,11 +414,11 @@ def get_input_fn(
   tf.logging.info("Total number of batches: %d", record_info["num_example"])
   tf.logging.info("Total number of files: %d", len(record_info["filenames"]))
   tf.logging.debug(record_info["filenames"])
-  
+
   kwargs = dict(
       data_files=record_info["filenames"],
       num_hosts=num_hosts,
-      is_training=split == "train",
+      is_training=False,  # split == "train",
       max_length=max_length,
       use_bfloat16=use_bfloat16,
       **kwargs)
