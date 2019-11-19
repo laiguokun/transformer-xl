@@ -307,54 +307,52 @@ def joint_rel_attn_loss(features, labels, n_token, is_training):
 
   #### Unpack input
   inputs = features["inputs"]
+  position = features["inputs_position"]
+  seg = features["inputs_segmentation"]
+  type_id = features["type_ids"]
   targets = features["targets"]
-  segment = features["segmentation"]
-  position = features["position"]
+  targets_map = features["targets_map"]
   loss_mask = features["loss_mask"]
-
+  valid_mask = tf.equal(seg, 0)
+  source_mask = tf.equal(type_id, 0)
+  target_mask = tf.logical_not(source_mask)
   # shapes
   bsz = tf.shape(inputs)[0]
   seq_len = tf.shape(inputs)[1]
 
-  # target type is 1 and source type is 0
-  type_id = tf.range(seq_len)
-  type_id = tf.math.floormod(type_id, 2)
-  target_mask = tf.cast(type_id, tf.bool)
-  source_mask = tf.logical_not(target_mask)
+  if FLAGS.double_type:
+    type_id = (type_id + 
+               tf.constant([FLAGS.n_token])[None, None] * target_mask)
 
   ##### attention mask: note that `1` indicates CANNOT attend
-  source_seg = segment
-  target_seg = segment
+  source_seg = seg * tf.cast(source_mask, seg.dtype)
+  target_seg = seg * tf.cast(target_mask, seg.dtype)
   # src mask
-  src_to_src = tf.logical_and(
-      tf.not_equal(source_seg[:, :, None], source_seg[:, None, :]),
-      tf.logical_and(source_mask[None, :, None], source_mask[None, None, :]))
-
-  src_to_tgt = tf.logical_and(
-      tf.ones([bsz, seq_len, seq_len], dtype=src_to_src.dtype),
-      tf.logical_and(source_mask[None, :, None], target_mask[None, None, :]))
+  src_to_src = tf.not_equal(
+      source_seg[:, :, None],
+      source_seg[:, None, :])
+  src_mask = tf.logical_or(src_to_src, target_mask[:, :, None])
 
   # tgt mask
-  tgt_to_src = tf.logical_and(
-      tf.not_equal(target_seg[:, :, None], source_seg[:, None, :]),
-      tf.logical_and(target_mask[None, :, None], source_mask[None, None, :]))
-
+  tgt_to_src = tf.not_equal(
+      target_seg[:, :, None],
+      source_seg[:, None, :])
   tgt_to_tgt = tf.not_equal(
       target_seg[:, :, None],
       target_seg[:, None, :])
   causal_mask = tf.cast(causal_attn_mask(qlen=seq_len), tgt_to_tgt.dtype)
   # If any one of them is `1` (indicating cannot attend), i.e. `logical_or`,
   # then the model should NOT attend
-  tgt_to_tgt = tf.logical_and(
-      tf.logical_or(tgt_to_tgt, causal_mask),
-      tf.logical_and(target_mask[None, :, None], target_mask[None, None, :]))
+  tgt_to_tgt = tf.logical_or(
+      tgt_to_tgt,
+      causal_mask)
+  tgt_mask = tf.logical_or(
+      tf.logical_and(tgt_to_src, tgt_to_tgt),
+      source_mask[:, :, None])
 
-  perm_mask = tf.logical_or(
-      tf.logical_or(src_to_src, src_to_tgt),
-      tf.logical_or(tgt_to_src, tgt_to_tgt))
+  # concat
+  perm_mask = tf.logical_and(src_mask, tgt_mask)
   perm_mask = tf.cast(perm_mask, tf_float)
-
-  target_map = tf.one_hot(tf.range(1, seq_len, delta=2), seq_len)
 
   #### Transformer Model
   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
@@ -387,7 +385,8 @@ def joint_rel_attn_loss(features, labels, n_token, is_training):
         lookup_table=word_embed_table,
         tie_weight=FLAGS.tie_weight,
         target_mapping=None,
-        hidden_mapping=target_map[None, :, :],
+        hidden_mapping=targets_map,
+        label_smooth=FLAGS.label_smooth,
         use_tpu=FLAGS.use_tpu)
 
     if lm_loss.dtype != tf.float32:

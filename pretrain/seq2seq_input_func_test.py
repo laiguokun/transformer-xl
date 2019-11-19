@@ -74,7 +74,7 @@ def main(unused_argv):
               print(tokenizer.convert_ids_to_tokens(v[i].tolist()))
             else:
               print(v[i].tolist())
-        else:
+        elif v.ndim == 1:
           if k in ["source", "target", "inputs", "targets"]:
             print(tokenizer.convert_ids_to_tokens(v.tolist()))
           else:
