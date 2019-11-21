@@ -53,7 +53,7 @@ def joint_loss(features, labels, n_token, is_training):
   else:
     tf_float = tf.float32
 
-    ##### format inputs
+  ##### format inputs
   inputs = tf.concat([source, target], axis=1)
   position = tf.concat([source_pos, target_pos], axis=1)
 
@@ -126,7 +126,8 @@ def joint_loss(features, labels, n_token, is_training):
     output, _ = tfm_func(
         inputs=input_embed,
         input_mask=None,
-        perm_mask=perm_mask)
+        perm_mask=perm_mask,
+        pos_seq=position)
 
     #### Only predict the target part
     tgt_out = output[:, src_len:]
@@ -293,114 +294,114 @@ def encdec_loss(features, labels, n_token, is_training):
   return total_loss, monitor_dict
 
 
-@bf16_decorator
-def joint_rel_attn_loss(features, labels, n_token, is_training):
-  """Decoder only seq2seq."""
-  del labels
+# @bf16_decorator
+# def joint_rel_attn_loss(features, labels, n_token, is_training):
+#   """Decoder only seq2seq."""
+#   del labels
 
-  initializer = _get_initializer()
+#   initializer = _get_initializer()
 
-  if FLAGS.use_bfloat16:
-    tf_float = tf.bfloat16
-  else:
-    tf_float = tf.float32
+#   if FLAGS.use_bfloat16:
+#     tf_float = tf.bfloat16
+#   else:
+#     tf_float = tf.float32
 
-  #### Unpack input
-  inputs = features["inputs"]
-  position = features["inputs_position"]
-  seg = features["inputs_segmentation"]
-  type_id = features["type_ids"]
-  targets = features["targets"]
-  targets_map = features["targets_map"]
-  loss_mask = features["loss_mask"]
-  source_mask = tf.equal(type_id, 0)
-  target_mask = tf.logical_not(source_mask)
+#   #### Unpack input
+#   inputs = features["inputs"]
+#   position = features["inputs_position"]
+#   seg = features["inputs_segmentation"]
+#   type_id = features["type_ids"]
+#   targets = features["targets"]
+#   targets_map = features["targets_map"]
+#   loss_mask = features["loss_mask"]
+#   source_mask = tf.equal(type_id, 0)
+#   target_mask = tf.logical_not(source_mask)
 
-  # shapes
-  seq_len = tf.shape(inputs)[1]
+#   # shapes
+#   seq_len = tf.shape(inputs)[1]
 
-  if FLAGS.double_type:
-    type_id = (type_id +
-               tf.constant([FLAGS.n_token])[None, None] * target_mask)
+#   if FLAGS.double_type:
+#     type_id = (type_id +
+#                tf.constant([FLAGS.n_token])[None, None] * target_mask)
 
-  ##### attention mask: note that `1` indicates CANNOT attend
-  source_seg = seg * tf.cast(source_mask, seg.dtype)
-  target_seg = seg * tf.cast(target_mask, seg.dtype)
-  # src mask
-  src_to_src = tf.not_equal(
-      source_seg[:, :, None],
-      source_seg[:, None, :])
-  src_mask = tf.logical_or(src_to_src, target_mask[:, :, None])
+#   ##### attention mask: note that `1` indicates CANNOT attend
+#   source_seg = seg * tf.cast(source_mask, seg.dtype)
+#   target_seg = seg * tf.cast(target_mask, seg.dtype)
+#   # src mask
+#   src_to_src = tf.not_equal(
+#       source_seg[:, :, None],
+#       source_seg[:, None, :])
+#   src_mask = tf.logical_or(src_to_src, target_mask[:, :, None])
 
-  # tgt mask
-  tgt_to_src = tf.not_equal(
-      target_seg[:, :, None],
-      source_seg[:, None, :])
-  tgt_to_tgt = tf.not_equal(
-      target_seg[:, :, None],
-      target_seg[:, None, :])
-  causal_mask = tf.cast(causal_attn_mask(qlen=seq_len), tgt_to_tgt.dtype)
-  # If any one of them is `1` (indicating cannot attend), i.e. `logical_or`,
-  # then the model should NOT attend
-  tgt_to_tgt = tf.logical_or(
-      tgt_to_tgt,
-      causal_mask)
-  tgt_mask = tf.logical_or(
-      tf.logical_and(tgt_to_src, tgt_to_tgt),
-      source_mask[:, :, None])
+#   # tgt mask
+#   tgt_to_src = tf.not_equal(
+#       target_seg[:, :, None],
+#       source_seg[:, None, :])
+#   tgt_to_tgt = tf.not_equal(
+#       target_seg[:, :, None],
+#       target_seg[:, None, :])
+#   causal_mask = tf.cast(causal_attn_mask(qlen=seq_len), tgt_to_tgt.dtype)
+#   # If any one of them is `1` (indicating cannot attend), i.e. `logical_or`,
+#   # then the model should NOT attend
+#   tgt_to_tgt = tf.logical_or(
+#       tgt_to_tgt,
+#       causal_mask)
+#   tgt_mask = tf.logical_or(
+#       tf.logical_and(tgt_to_src, tgt_to_tgt),
+#       source_mask[:, :, None])
 
-  # concat
-  perm_mask = tf.logical_and(src_mask, tgt_mask)
-  perm_mask = tf.cast(perm_mask, tf_float)
+#   # concat
+#   perm_mask = tf.logical_and(src_mask, tgt_mask)
+#   perm_mask = tf.cast(perm_mask, tf_float)
 
-  #### Transformer Model
-  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
-    inp_func = _get_inp_func(n_token,
-                             FLAGS.d_model,
-                             initializer,
-                             is_training)
-    input_embed, word_embed_table = inp_func(
-        inputs=inputs, type_id=type_id, pos_seq=position,
-        return_embed_table=True)
+#   #### Transformer Model
+#   with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
+#     inp_func = _get_inp_func(n_token,
+#                              FLAGS.d_model,
+#                              initializer,
+#                              is_training)
+#     input_embed, word_embed_table = inp_func(
+#         inputs=inputs, type_id=type_id, pos_seq=position,
+#         return_embed_table=True)
 
-    tfm_func = _get_tfm_func(initializer,
-                             is_training,
-                             phase="pretrain")
-    output, _ = tfm_func(
-        inputs=input_embed,
-        input_mask=None,
-        perm_mask=perm_mask)
+#     tfm_func = _get_tfm_func(initializer,
+#                              is_training,
+#                              phase="pretrain")
+#     output, _ = tfm_func(
+#         inputs=input_embed,
+#         input_mask=None,
+#         perm_mask=perm_mask)
 
-    #### Only predict the target part
-    tf.logging.info("Output: %s, target output: %s",
-                    output.shape, targets.shape)
+#     #### Only predict the target part
+#     tf.logging.info("Output: %s, target output: %s",
+#                     output.shape, targets.shape)
 
-    lm_loss, nll_loss = model.lm_loss(
-        hidden=output,
-        target=targets,
-        n_token=n_token,
-        d_model=FLAGS.d_model,
-        initializer=initializer,
-        lookup_table=word_embed_table,
-        tie_weight=FLAGS.tie_weight,
-        target_mapping=None,
-        hidden_mapping=targets_map,
-        label_smooth=FLAGS.label_smooth,
-        use_tpu=FLAGS.use_tpu)
+#     lm_loss, nll_loss = model.lm_loss(
+#         hidden=output,
+#         target=targets,
+#         n_token=n_token,
+#         d_model=FLAGS.d_model,
+#         initializer=initializer,
+#         lookup_table=word_embed_table,
+#         tie_weight=FLAGS.tie_weight,
+#         target_mapping=None,
+#         hidden_mapping=targets_map,
+#         label_smooth=FLAGS.label_smooth,
+#         use_tpu=FLAGS.use_tpu)
 
-    if lm_loss.dtype != tf.float32:
-      lm_loss = tf.cast(lm_loss, tf.float32)
+#     if lm_loss.dtype != tf.float32:
+#       lm_loss = tf.cast(lm_loss, tf.float32)
 
-    loss_mask = tf.cast(loss_mask, lm_loss.dtype)
-    num_loss = tf.reduce_sum(loss_mask)
-    total_loss = tf.reduce_sum(lm_loss * loss_mask) / num_loss
-    nll = tf.reduce_sum(nll_loss * loss_mask) / num_loss
+#     loss_mask = tf.cast(loss_mask, lm_loss.dtype)
+#     num_loss = tf.reduce_sum(loss_mask)
+#     total_loss = tf.reduce_sum(lm_loss * loss_mask) / num_loss
+#     nll = tf.reduce_sum(nll_loss * loss_mask) / num_loss
 
-  # To be compatible with fairseq, convert to base 2 for logging
-  monitor_dict = {
-      "loss": total_loss / math.log(2),
-      "nll": nll / math.log(2),
-      "num_loss": num_loss,
-  }
+#   # To be compatible with fairseq, convert to base 2 for logging
+#   monitor_dict = {
+#       "loss": total_loss / math.log(2),
+#       "nll": nll / math.log(2),
+#       "num_loss": num_loss,
+#   }
 
-  return total_loss, monitor_dict
+#   return total_loss, monitor_dict

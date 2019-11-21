@@ -29,7 +29,7 @@ except ImportError as e:
   import tensorflow as tf
   import model_utils
   import optimization
-  import seq2seq_model_func_builder
+  import seq2seq_model_func_builder as model_func_builder
   import seq2seq_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 
@@ -152,10 +152,7 @@ def get_model_fn(n_token):
 
     #### Get loss from inputs
     if FLAGS.seq2seq_type == "dec_only":
-      if FLAGS.rel_attn:
-        seq2seq_loss = model_func_builder.joint_rel_attn_loss
-      else:
-        seq2seq_loss = model_func_builder.joint_loss
+      seq2seq_loss = model_func_builder.joint_loss
     elif FLAGS.seq2seq_type == "encdec":
       seq2seq_loss = model_func_builder.encdec_loss
     else:
