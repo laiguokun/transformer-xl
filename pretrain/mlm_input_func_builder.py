@@ -26,6 +26,13 @@ flags.DEFINE_enum("sample_strategy", default="single_token",
                   enum_values=["single_token", "token_span"],
                   help="Stragey used to sample prediction targets.")
 
+flags.DEFINE_float("leak_ratio", default=0.1,
+                   help="Percent of masked positions that are filled with "
+                   "original tokens.")
+flags.DEFINE_float("rand_ratio", default=0.1,
+                   help="Percent of masked positions that are filled with "
+                   "random tokens.")
+
 flags.DEFINE_integer("max_tok", default=4,
                      help="Maximum number of tokens to sample in a span."
                      "Effective when token_span strategy is used.")
@@ -107,20 +114,24 @@ def _token_span_mask(inputs, tgt_len, num_predict):
                            num_predict)
 
 
-def _single_token_mask(inputs, tgt_len, num_predict):
+def _single_token_mask(inputs, tgt_len, num_predict, exclude_mask=None):
   """Sample individual tokens as prediction targets."""
-  all_indices = tf.range(tgt_len, dtype=tf.int64)
-  non_func_mask = tf.not_equal(inputs, FLAGS.eos_id)
-  non_func_indices = tf.boolean_mask(all_indices, non_func_mask)
+  func_mask = tf.equal(inputs, FLAGS.eos_id)
+  if exclude_mask is None:
+    exclude_mask = func_mask
+  else:
+    exclude_mask = tf.logical_or(func_mask, exclude_mask)
+  candidate_mask = tf.logical_not(exclude_mask)
 
-  masked_pos = tf.random_shuffle(non_func_indices)
+  all_indices = tf.range(tgt_len, dtype=tf.int64)
+  candidate_indices = tf.boolean_mask(all_indices, candidate_mask)
+  masked_pos = tf.random_shuffle(candidate_indices)
   masked_pos = tf.contrib.framework.sort(masked_pos[:num_predict])
   target_mask = tf.sparse_to_dense(
       sparse_indices=masked_pos,
       output_shape=[tgt_len],
       sparse_values=1.0,
       default_value=0.0)
-
   is_masked = tf.cast(target_mask, tf.bool)
 
   return is_masked
@@ -132,24 +143,103 @@ def online_sample_masks(inputs, tgt_len, num_predict):
   if FLAGS.sample_strategy == "single_token":
     return _single_token_mask(inputs, tgt_len, num_predict)
   elif FLAGS.sample_strategy == "token_span":
-    return _token_span_mask(inputs, tgt_len, num_predict)
+    is_masked = _token_span_mask(inputs, tgt_len, num_predict)
+    cur_num_masked = tf.reduce_sum(tf.cast(is_masked, tf.int64))
+    extra_mask = _single_token_mask(
+        inputs, tgt_len, num_predict - cur_num_masked, is_masked)
+    return tf.logical_or(is_masked, extra_mask)
   else:
     raise NotImplementedError
 
 
 def discrepancy_correction(inputs, is_masked, tgt_len):
   """Construct the masked input."""
-  # 80% MASK, 10% original, 10% random words
   random_p = tf.random.uniform([tgt_len], maxval=1.0)
-  mask_array = tf.constant(FLAGS.mask_id, dtype=tf.int64, shape=[tgt_len])
-  mask_v = tf.where(random_p < 0.2, inputs, mask_array)
-  random_words = tf.random.uniform([tgt_len], maxval=FLAGS.vocab_size,
-                                   dtype=tf.int64)
-  mask_v = tf.where(random_p < 0.1, random_words, mask_v)
+  mask_ids = tf.constant(FLAGS.mask_id, dtype=inputs.dtype, shape=[tgt_len])
 
-  masked_ids = tf.where(is_masked, mask_v, inputs)
+  change_to_mask = tf.logical_and(random_p > FLAGS.leak_ratio, is_masked)
+  masked_ids = tf.where(change_to_mask, mask_ids, inputs)
+
+  if FLAGS.rand_ratio > 0:
+    change_to_rand = tf.logical_and(
+        FLAGS.leak_ratio < random_p,
+        random_p < FLAGS.leak_ratio + FLAGS.rand_ratio)
+    change_to_rand = tf.logical_and(change_to_rand, is_masked)
+    rand_ids = tf.random.uniform([tgt_len], maxval=FLAGS.vocab_size,
+                                 dtype=masked_ids.dtype)
+    masked_ids = tf.where(change_to_rand, rand_ids, masked_ids)
 
   return masked_ids
+
+
+def create_perm(inputs, is_masked, seq_len):
+  """Sample a factorization order, and create an attention mask accordingly.
+
+  Args:
+    inputs: int64 Tensor in shape [seq_len], input ids.
+    is_masked: bool Tensor in shape [seq_len]. True means being selected
+      for partial prediction.
+    seq_len: int, sequence length.
+
+  Returns:
+    perm_mask_k: flat32 Tensor in shape [seq_len, seq_len].
+    perm_mask_q: flat32 Tensor in shape [seq_len, seq_len].
+    inputs_k: int64 Tensor in shape [seq_len], input ids.
+    inputs_q: int64 Tensor in shape [seq_len], masked input ids.
+    is_masekd: bool Tensor in shape [seq_len], whether a target
+  """
+
+  # Generate permutation indices
+  index = tf.range(seq_len, dtype=tf.int64)
+  index = tf.random_shuffle(index)
+
+  # non-functional tokens
+  non_func_tokens = tf.not_equal(inputs, FLAGS.eos_id)
+  masked_tokens = tf.logical_and(is_masked, non_func_tokens)
+  non_masked_or_func_tokens = tf.logical_not(masked_tokens)
+
+  # Randomly leak some masked tokens
+  random_p = tf.random.uniform([seq_len], maxval=1.0)
+  if FLAGS.leak_ratio > 0:
+    leak_tokens = tf.logical_and(
+        masked_tokens,
+        random_p < FLAGS.leak_ratio)
+    can_attend_self = tf.logical_or(non_masked_or_func_tokens, leak_tokens)
+  else:
+    can_attend_self = non_masked_or_func_tokens
+
+  ##### perm_mask_k & perm_mask_q
+  smallest_index = -2 * tf.ones([seq_len], dtype=tf.int64)
+  to_index = tf.where(can_attend_self, smallest_index, index)
+  from_index = tf.where(can_attend_self, to_index + 1, to_index)
+
+  # For masked tokens, can attend if i > j
+  # For context tokens, always can attend each other
+  can_attend_q = from_index[:, None] > to_index[None, :]
+  can_attend_k = from_index[:, None] >= to_index[None, :]
+
+  # In modeling, 1 indicates cannot attend. Hence, reverse the value here.
+  perm_mask_q = 1.0 - tf.cast(can_attend_q, tf.float32)
+  perm_mask_k = 1.0 - tf.cast(can_attend_k, tf.float32)
+
+  ##### inputs_k & inputs_q
+  # construct inputs_k
+  inputs_k = inputs
+
+  # construct inputs_q
+  mask_ids = tf.constant(FLAGS.mask_id, shape=[seq_len], dtype=inputs_k.dtype)
+  inputs_q = tf.where(can_attend_self, inputs_k, mask_ids)
+
+  if FLAGS.rand_ratio > 0:
+    rand_ids = tf.random.uniform([seq_len], maxval=FLAGS.vocab_size,
+                                 dtype=inputs_k.dtype)
+    change_to_rand = tf.logical_and(
+        FLAGS.leak_ratio < random_p,
+        random_p < FLAGS.leak_ratio + FLAGS.rand_ratio)
+    change_to_rand = tf.logical_and(change_to_rand, is_masked)
+    inputs_q = tf.where(change_to_rand, rand_ids, inputs_q)
+
+  return perm_mask_k, perm_mask_q, inputs_k, inputs_q, masked_tokens
 
 
 def create_target_mapping(example, is_masked, seq_len, num_predict,
@@ -176,40 +266,14 @@ def create_target_mapping(example, is_masked, seq_len, num_predict,
       axis=0)
   example["target_mask"] = tf.reshape(target_mask, [num_predict])
 
-  ##### others
+  ##### Handle fields in kwargs
   for k, v in kwargs.items():
-    tf.logging.info("Retrieve %s.", k)
-    v = tf.boolean_mask(v, is_masked)
-    paddings = tf.zeros([pad_len], dtype=v.dtype)
-    v = tf.concat([v, paddings], axis=0)
-    example[k] = tf.reshape(v, [num_predict])
-
-
-def create_mlm_target(example, seq_len, num_predict, use_bfloat16):
-  """docs."""
-  inputs = example["inputs"]
-
-  # sample mask
-  is_masked = online_sample_masks(
-      inputs, seq_len, num_predict)
-  masked_input = discrepancy_correction(inputs, is_masked, seq_len)
-
-  # masked_input, original_input, input_mask
-  example["masked_input"] = tf.reshape(masked_input, [seq_len])
-  example["inp_mask"] = tf.cast(
-      tf.equal(example["masked_input"], FLAGS.mask_id), tf.float32)
-
-  # create target mapping
-  create_target_mapping(example, is_masked, seq_len, num_predict,
-                        target=inputs)
-
-  # type cast for example
-  type_cast(example, use_bfloat16)
-
-  for k, v in example.items():
-    tf.logging.info("%s: %s", k, v)
-
-  return example
+    pad_shape = [pad_len] + v.shape.as_list()[1:]
+    tgt_shape = [num_predict] + v.shape.as_list()[1:]
+    example[k] = tf.concat([
+        tf.boolean_mask(v, is_masked),
+        tf.zeros(shape=pad_shape, dtype=v.dtype)], 0)
+    example[k].set_shape(tgt_shape)
 
 
 def chunk_to_sequence(dataset, seq_len):
@@ -256,6 +320,33 @@ def chunk_to_sequence(dataset, seq_len):
   return dataset
 
 
+def create_mlm_target(example, seq_len, num_predict, use_bfloat16):
+  """docs."""
+  inputs = example["inputs"]
+
+  # sample mask
+  is_masked = online_sample_masks(
+      inputs, seq_len, num_predict)
+  masked_input = discrepancy_correction(inputs, is_masked, seq_len)
+
+  # masked_input, original_input, input_mask
+  example["masked_input"] = tf.reshape(masked_input, [seq_len])
+  example["inp_mask"] = tf.cast(
+      tf.equal(example["masked_input"], FLAGS.mask_id), tf.float32)
+
+  # create target mapping
+  create_target_mapping(example, is_masked, seq_len, num_predict,
+                        target=inputs)
+
+  # type cast for example
+  type_cast(example, use_bfloat16)
+
+  for k, v in example.items():
+    tf.logging.info("%s: %s", k, v)
+
+  return example
+
+
 def mlm_process(dataset, seq_len, num_predict, use_bfloat16):
   """Process input tfrecords into proper format for MLM training."""
   # Get input sequence
@@ -268,6 +359,57 @@ def mlm_process(dataset, seq_len, num_predict, use_bfloat16):
       num_predict=num_predict,
       use_bfloat16=use_bfloat16)
   dataset = dataset.map(create_mlm_target_mapper, num_parallel_calls=64)
+
+  return dataset
+
+
+def create_xlnet_target(example, seq_len, num_predict, use_bfloat16):
+  """docs."""
+  inputs = example.pop("inputs")
+  type_id = example.pop("type_id")
+  is_masked = online_sample_masks(inputs, seq_len, num_predict)
+
+  # permutate the entire sequence together
+  perm_mask_k, perm_mask_q, input_k, input_q, is_masked = create_perm(
+      inputs, is_masked, seq_len)
+
+  # Set shape
+  perm_mask_k.set_shape([seq_len, seq_len])
+  perm_mask_q.set_shape([seq_len, seq_len])
+  input_k.set_shape([seq_len])
+  input_q.set_shape([seq_len])
+
+  # reshape back to fixed shape
+  example["input_k"] = input_k
+  example["type_id_k"] = type_id
+  example["perm_mask_k"] = perm_mask_k
+
+  # create target mapping
+  create_target_mapping(example, is_masked, seq_len, num_predict,
+                        target=inputs, input_q=input_q, type_id_q=type_id,
+                        perm_mask_q=perm_mask_q)
+
+  # type cast for example
+  type_cast(example, use_bfloat16)
+
+  for k, v in example.items():
+    tf.logging.info("%s: %s", k, v)
+
+  return example
+
+
+def xlnet_process(dataset, seq_len, num_predict, use_bfloat16):
+  """Process input tfrecords into proper format for MLM training."""
+  # Get input sequence
+  dataset = chunk_to_sequence(dataset, seq_len)
+
+  # Create XLNet target
+  create_xlnet_target_mapper = functools.partial(
+      create_xlnet_target,
+      seq_len=seq_len,
+      num_predict=num_predict,
+      use_bfloat16=use_bfloat16)
+  dataset = dataset.map(create_xlnet_target_mapper, num_parallel_calls=64)
 
   return dataset
 
@@ -375,7 +517,10 @@ def sent_mlm_dataset(params,
                          record_shuffle_size=record_shuffle_size)
 
   # process dataset
-  dataset = mlm_process(dataset, seq_len, num_predict, use_bfloat16)
+  if FLAGS.loss_type == "xlnet":
+    dataset = xlnet_process(dataset, seq_len, num_predict, use_bfloat16)
+  else:
+    dataset = mlm_process(dataset, seq_len, num_predict, use_bfloat16)
 
   # Sequence level shuffle
   if is_training and sequence_shuffle_size:
@@ -441,7 +586,10 @@ def semidoc_mlm_dataset(params,
                          record_shuffle_size=record_shuffle_size)
 
   # process dataset
-  dataset = mlm_process(dataset, seq_len, num_predict, use_bfloat16)
+  if FLAGS.loss_type == "xlnet":
+    dataset = xlnet_process(dataset, seq_len, num_predict, use_bfloat16)
+  else:
+    dataset = mlm_process(dataset, seq_len, num_predict, use_bfloat16)
 
   # Sequence level shuffle
   if is_training and sequence_shuffle_size:
@@ -517,7 +665,12 @@ def doc_mlm_dataset(params,
     shards = [dataset.shard(bsz_per_core, i) for i in range(bsz_per_core)]
 
   # process each shard
-  process_shard = functools.partial(mlm_process,
+  if FLAGS.loss_type == "xlnet":
+    process_func = xlnet_process
+  else:
+    process_func = mlm_process
+
+  process_shard = functools.partial(process_func,
                                     seq_len=seq_len,
                                     num_predict=num_predict,
                                     use_bfloat16=use_bfloat16)

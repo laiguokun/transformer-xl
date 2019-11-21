@@ -389,3 +389,50 @@ def multihead_attn(q, k, v, attn_mask, d_model, n_head, d_head, dropout,
 
   return output, monitor_dict
 
+
+def consecutive_rel_encoding(seq_len, d_model, n_head, clamp_len, dropout,
+                             is_training, initializer, dtype=tf.float32):
+  """Create relative attention bias based on seq_len."""
+  pos_seq = tf.range(seq_len, -seq_len, -1.0)
+  pos_seq = tf.cast(pos_seq, dtype=dtype)
+  if clamp_len > 0:
+    pos_seq = tf.clip_by_value(pos_seq, -clamp_len, clamp_len)
+
+  freq_seq = tf.cast(tf.range(0, d_model, 2.0), dtype=dtype)
+  inv_freq = 1 / (10000 ** (freq_seq / d_model))
+
+  sinusoid_inp = tf.einsum("i,d->id", pos_seq, inv_freq)
+  pos_enc = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], -1)
+  pos_enc = tf.layers.dropout(pos_enc, dropout, training=is_training)
+
+  pos_vec = tf.get_variable("pos_vec", [n_head, d_model],
+                            dtype=dtype, initializer=initializer)
+  attn_bias = tf.einsum("nd,id->ni", pos_vec, pos_enc)[:, None, :]
+  attn_bias = tf.broadcast_to(attn_bias, [n_head, seq_len, 2 * seq_len])
+  attn_bias = rel_shift(attn_bias, row_dim=-2, klen=seq_len)
+
+  return attn_bias
+
+
+def rel_encoding(pos_q, pos_k, d_model, n_head, clamp_len, dropout,
+                 is_training, initializer, dtype=tf.float32):
+  """Create inputs related to relative position encoding."""
+  pos_q = tf.cast(pos_q, dtype)
+  pos_k = tf.cast(pos_k, dtype)
+  dist_mat = tf.expand_dims(pos_q, -1) - tf.expand_dims(pos_k, -2)
+  if clamp_len > 0:
+    dist_mat = tf.clip_by_value(dist_mat, -clamp_len, clamp_len)
+
+  freq_seq = tf.cast(tf.range(0, d_model, 2.0), dtype=dtype)
+  inv_freq = 1 / (10000 ** (freq_seq / d_model))
+
+  sinusoid_inp = tf.einsum("bij,d->bijd", dist_mat, inv_freq)
+  pos_enc = tf.concat([tf.sin(sinusoid_inp), tf.cos(sinusoid_inp)], -1)
+  pos_enc = tf.layers.dropout(pos_enc, dropout, training=is_training)
+
+  pos_vec = tf.get_variable("pos_vec", [n_head, d_model],
+                            dtype=dtype, initializer=initializer)
+  attn_bias = tf.einsum("nd,bijd->bnij", pos_vec, pos_enc)
+
+  return attn_bias
+

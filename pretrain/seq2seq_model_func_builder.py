@@ -15,13 +15,13 @@ try:
   import google3.experimental.users.zihangd.pretrain.model as model
   from google3.experimental.users.zihangd.pretrain.common_ops import causal_attn_mask
   from google3.experimental.users.zihangd.pretrain.model_utils import \
-      _get_initializer, _get_inp_func, _get_tfm_func, \
-      bf16_decorator
+      _get_initializer, _get_inp_func, _get_tfm_func, bf16_decorator
 except ImportError:
   import model
   from common_ops import causal_attn_mask
   from model_utils import _get_initializer, _get_inp_func, _get_tfm_func, \
       bf16_decorator
+# pylint: enable=g-import-not-at-top
 
 
 FLAGS = flags.FLAGS
@@ -313,15 +313,14 @@ def joint_rel_attn_loss(features, labels, n_token, is_training):
   targets = features["targets"]
   targets_map = features["targets_map"]
   loss_mask = features["loss_mask"]
-  valid_mask = tf.equal(seg, 0)
   source_mask = tf.equal(type_id, 0)
   target_mask = tf.logical_not(source_mask)
+
   # shapes
-  bsz = tf.shape(inputs)[0]
   seq_len = tf.shape(inputs)[1]
 
   if FLAGS.double_type:
-    type_id = (type_id + 
+    type_id = (type_id +
                tf.constant([FLAGS.n_token])[None, None] * target_mask)
 
   ##### attention mask: note that `1` indicates CANNOT attend
@@ -392,11 +391,12 @@ def joint_rel_attn_loss(features, labels, n_token, is_training):
     if lm_loss.dtype != tf.float32:
       lm_loss = tf.cast(lm_loss, tf.float32)
 
+    loss_mask = tf.cast(loss_mask, lm_loss.dtype)
     num_loss = tf.reduce_sum(loss_mask)
     total_loss = tf.reduce_sum(lm_loss * loss_mask) / num_loss
     nll = tf.reduce_sum(nll_loss * loss_mask) / num_loss
 
-    # To be compatible with fairseq, convert to base 2 for logging
+  # To be compatible with fairseq, convert to base 2 for logging
   monitor_dict = {
       "loss": total_loss / math.log(2),
       "nll": nll / math.log(2),

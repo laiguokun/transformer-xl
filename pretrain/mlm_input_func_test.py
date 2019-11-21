@@ -37,6 +37,8 @@ flags.DEFINE_integer("num_predict", default=10,
                      help="Num of position to predict.")
 flags.DEFINE_integer("num_example", default=2,
                      help="Num of examples to see.")
+flags.DEFINE_string("loss_type", default="mlm",
+                    help="Loss type.")
 
 FLAGS = flags.FLAGS
 
@@ -76,19 +78,21 @@ def main(unused_argv):
       for k, v in example_np.items():
         if v.ndim == 2:
           for i in range(v.shape[0]):
-            if k in ["masked_input", "inputs"]:
+            if k in ["masked_input", "inputs", "input_k", "input_q", "target"]:
               print(k, tokenizer.convert_ids_to_text(v[i].tolist()))
             elif k in ["type_id"]:
               print(k, " ".join([str(j) for j in v[i].tolist()]))
-            # else:
-            #   print(v[i].tolist())
+            else:
+              print(k)
+              print(v[i])
         else:
-          if k in ["masked_input", "inputs"]:
+          if k in ["masked_input", "inputs", "input_k", "input_q", "target"]:
             print(k, tokenizer.convert_ids_to_text(v.tolist()))
           elif k in ["type_id"]:
             print(k, " ".join([str(j) for j in v.tolist()]))
-          # else:
-          #   print(v.tolist())
+          else:
+            print(k)
+            print(v)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,8 @@ try:
   from google3.experimental.users.zihangd.pretrain.common_ops import positionwise_ffn
   from google3.experimental.users.zihangd.pretrain.common_ops import multihead_attn
   from google3.experimental.users.zihangd.pretrain.common_ops import layer_norm
-  from google3.experimental.users.zihangd.pretrain.common_ops import rel_shift
+  from google3.experimental.users.zihangd.pretrain.common_ops import rel_encoding
+  from google3.experimental.users.zihangd.pretrain.common_ops import consecutive_rel_encoding
 except ImportError:
   from common_ops import update_monitor_dict
   from common_ops import sinusoid_positional_encoding
@@ -31,7 +32,8 @@ except ImportError:
   from common_ops import positionwise_ffn
   from common_ops import multihead_attn
   from common_ops import layer_norm
-  from common_ops import rel_shift
+  from common_ops import rel_encoding
+  from common_ops import consecutive_rel_encoding
 # pylint: enable=g-import-not-at-top
 
 
@@ -92,9 +94,9 @@ flags.DEFINE_integer("gen_shrink", default=3,
 
 # joint model pretrain specific
 flags.DEFINE_bool("double_type", default=False,
-                  help="Use type id to differeniate the encoder and decoder \
-                        in the joint model. [0,n_type) for encoder, \
-                        (n_type, 2*n_type] for decoder")
+                  help="Use type id to differeniate the encoder and decoder "
+                  "in the joint model. [0,n_type) for encoder, "
+                  "(n_type, 2*n_type] for decoder")
 
 ##### Parameter initialization
 flags.DEFINE_enum("init", default="truncated_normal",
@@ -234,30 +236,12 @@ def input_layer(inputs, type_id, n_token, n_type, n_pos, d_embed, dropout,
     return output
 
 
-def rel_pos_encoding(output, d_model, n_head, clamp_len, dropout, is_training,
-                     initializer):
-  """Create inputs related to relative position encoding."""
-  seq_len = tf.shape(output)[1]
-  rel_pos_seq = tf.range(seq_len, -seq_len, -1)
-  pos_enc = sinusoid_positional_encoding(
-      rel_pos_seq, d_model, clamp_len=clamp_len, dtype=output.dtype)
-  pos_enc = tf.layers.dropout(pos_enc, dropout, training=is_training)
-
-  pos_vec = tf.get_variable("pos_vec", [n_head, d_model],
-                            dtype=output.dtype, initializer=initializer)
-  attn_bias = tf.einsum("nd,id->ni", pos_vec, pos_enc)[:, None, :]
-  attn_bias = tf.broadcast_to(attn_bias, [n_head, seq_len, 2 * seq_len])
-  attn_bias = rel_shift(attn_bias, row_dim=-2, klen=seq_len)
-
-  return attn_bias
-
-
 def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
                 dropout, dropatt, dropact, initializer, is_training,
                 context=None, context_mask=None, input_mask=None,
                 perm_mask=None, ff_activation="relu", causal=False,
-                rel_attn=False, clamp_len=-1, return_all_hidden=False,
-                scope="transformer"):
+                rel_attn=False, pos_seq=None, clamp_len=-1,
+                return_all_hidden=False, scope="transformer"):
   """Transformer model."""
 
   monitor_dict = {}
@@ -302,8 +286,15 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
     ##### Get relative attention bias
     if rel_attn:
       tf.logging.info("Use relative attention")
-      attn_bias = rel_pos_encoding(
-          output, d_model, n_head, clamp_len, dropout, is_training, initializer)
+      if pos_seq is None:
+        seq_len = tf.shape(output)[1]
+        attn_bias = consecutive_rel_encoding(
+            seq_len, d_model, n_head, clamp_len, dropout, is_training,
+            initializer, output.dtype)
+      else:
+        attn_bias = rel_encoding(
+            pos_seq, pos_seq, d_model, n_head, clamp_len, dropout, is_training,
+            initializer, output.dtype)
     else:
       attn_bias = None
 
@@ -362,6 +353,87 @@ def transformer(inputs, n_layer, d_model, n_head, d_head, d_inner,
       return hiddens, monitor_dict
     else:
       return output, monitor_dict
+
+
+def xlnet(
+    input_k, input_cat, mapping, n_layer, d_model, n_head, d_head, d_inner,
+    dropout, dropatt, dropact, initializer, is_training, input_mask=None,
+    perm_mask=None, ff_activation="gelu", clamp_len=-1,
+    scope="transformer"):
+  """XLNet."""
+
+  tf.logging.info("===== XLNet =====")
+  tf.logging.info("Input related:")
+  tf.logging.info("  - input_k %s", input_k)
+  tf.logging.info("  - input_cat %s", input_cat)
+  tf.logging.info("  - input_mask %s", input_mask)
+  tf.logging.info("  - perm_mask %s", perm_mask)
+  tf.logging.info("  - mapping %s", mapping)
+  tf.logging.info("Hparam related:")
+  tf.logging.info("  - initializer %s", initializer)
+  tf.logging.info("  - ff_activation %s", ff_activation)
+  tf.logging.info("=============================")
+
+  monitor_dict = {}
+  with tf.variable_scope(scope):
+    ##### Shapes
+    bsz = tf.shape(input_k)[0]
+    seq_len = tf.shape(input_k)[1]
+
+    ##### Attention mask
+    attn_mask = merge_attn_masks(None, input_mask, perm_mask)
+
+    ##### Relative position and segment encoding
+    attn_bias_k = consecutive_rel_encoding(
+        seq_len, d_model, n_head, clamp_len, dropout, is_training,
+        initializer, input_cat.dtype)
+    attn_bias_q = tf.einsum("nij,bki->bnkj", attn_bias_k, mapping)
+    attn_bias_k = tf.broadcast_to(attn_bias_k[None],
+                                  [bsz, n_head, seq_len, seq_len])
+    attn_bias = tf.concat([attn_bias_k, attn_bias_q], -2)
+
+    ##### Concat into one sequence
+    output = input_cat
+    if output.shape.as_list()[-1] != d_model:
+      tf.logging.info("Project input embedding: %d -> %d",
+                      output.shape.as_list()[-1], d_model)
+      output = tf.layers.dense(output, d_model, activation=None,
+                               kernel_initializer=initializer,
+                               name="input_projection")
+
+    for i in range(n_layer):
+      with tf.variable_scope("layer_{}".format(i)):
+        output, attn_dict = multihead_attn(
+            q=output,
+            k=output[:, :seq_len],
+            v=output[:, :seq_len],
+            attn_mask=attn_mask,
+            attn_bias=attn_bias,
+            d_model=d_model,
+            n_head=n_head,
+            d_head=d_head,
+            dropout=dropout,
+            dropatt=dropatt,
+            is_training=is_training,
+            kernel_initializer=initializer)
+
+        output, ffn_dict = positionwise_ffn(
+            inp=output,
+            d_model=d_model,
+            d_inner=d_inner,
+            dropout=dropout,
+            dropact=dropact,
+            initializer=initializer,
+            activation_type=ff_activation,
+            is_training=is_training)
+
+        # Update monitor dict
+        monitor_dict = update_monitor_dict(
+            monitor_dict, attn_dict, prefix="layer_{}_attn".format(i))
+        monitor_dict = update_monitor_dict(
+            monitor_dict, ffn_dict, prefix="layer_{}_ff".format(i))
+
+    return output[:, :seq_len], output[:, seq_len:], monitor_dict
 
 
 def cls_loss(hidden, target, n_cls, d_model, initializer, hidden_mapping=None,
@@ -537,7 +609,6 @@ def binary_loss(hidden, target, d_model, initializer, hidden_mapping=None,
     correct = tf.cast(tf.equal(prediction, target), tf.float32)
 
   return loss, correct
-
 
 
 def summarize_sequence(summary_type, hidden, d_model, n_head, d_head, dropout,

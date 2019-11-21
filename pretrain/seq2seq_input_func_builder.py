@@ -320,19 +320,18 @@ def get_dataset(params,
         example.pop("type_ids_position")
         return example
       def reset_pos(example):
-        # reset the pos in one segment
+        """reset the pos in one segment."""
         # input pos: [0, 1, 2, 3, 4, 5, 0, ....]
         # input type_ids: [0, 0, 0, 1, 1, 1, 0, ....]
         # target pos:
         pos = example["inputs_position"]
-        seq_len = tf.shape(pos)[0]
         type_ids = example["type_ids"]
         seg = example["inputs_segmentation"]
         seg_num = tf.reduce_max(seg) + 1
         source_mask = tf.cast(1 - type_ids, pos.dtype)
         seg_map = tf.one_hot(seg, seg_num, dtype=source_mask.dtype)
-        source_cnt = tf.einsum('l,ls->s', source_mask, seg_map)
-        source_cnt = tf.einsum('s,ls->l', source_cnt, seg_map)
+        source_cnt = tf.einsum("l,ls->s", source_mask, seg_map)
+        source_cnt = tf.einsum("s,ls->l", source_cnt, seg_map)
         target_pos = pos - source_cnt
         new_pos = tf.where(tf.cast(source_mask, tf.bool), pos, target_pos)
         example["inputs_position"] = new_pos
@@ -342,20 +341,21 @@ def get_dataset(params,
                             num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
       def get_target(example):
+        """Deal with target."""
         seq_len = tf.shape(example["inputs"])[0]
         targets_mask = tf.cast(example["type_ids"], tf.bool)
         targets = tf.boolean_mask(example["inputs"], targets_mask)
 
-        pad_len = (seq_len - 
-                  tf.cast(tf.reduce_sum(example["type_ids"]), 
-                          dtype=seq_len.dtype))
+        pad_len = (seq_len -
+                   tf.cast(tf.reduce_sum(example["type_ids"]),
+                           dtype=seq_len.dtype))
         targets = tf.concat(
-            [targets,tf.zeros(shape=[pad_len], dtype=targets.dtype)],
+            [targets, tf.zeros(shape=[pad_len], dtype=targets.dtype)],
             axis=0)
         targets_idx = tf.boolean_mask(tf.range(seq_len), targets_mask)
         targets_idx = tf.concat(
-              [targets_idx, tf.zeros(shape=[pad_len], dtype=targets_idx.dtype)],
-              axis=0)
+            [targets_idx, tf.zeros(shape=[pad_len], dtype=targets_idx.dtype)],
+            axis=0)
 
         targets_map = tf.one_hot(targets_idx, seq_len)
 
@@ -377,7 +377,7 @@ def get_dataset(params,
         return example
 
       dataset = dataset.map(get_target,
-                            num_parallel_calls=tf.data.experimental.AUTOTUNE)        
+                            num_parallel_calls=tf.data.experimental.AUTOTUNE)
       dataset = dataset.map(remove_auxiliary_structure,
                             num_parallel_calls=tf.data.experimental.AUTOTUNE)
     else:
@@ -390,9 +390,6 @@ def get_dataset(params,
     dataset = dataset.prefetch(prefetch_size)
 
   dataset = dataset.repeat()
-
-  type_cast_ = functools.partial(type_cast, use_bfloat16=use_bfloat16)
-  dataset = dataset.map(type_cast_, num_parallel_calls=num_threads)
 
   ##### Filter out invalid (in terms of length) records
   tpu_valid_size = functools.partial(example_valid_size,
@@ -411,6 +408,11 @@ def get_dataset(params,
   if is_training:
     tf.logging.info("Batch level shuffle with size: %d", batch_shuffle_size)
     dataset = dataset.shuffle(batch_shuffle_size)
+
+  ##### Cast to float16 if needed
+  type_cast_ = functools.partial(type_cast, use_bfloat16=use_bfloat16)
+  dataset = dataset.map(type_cast_,
+                        num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
   return dataset
 
@@ -477,7 +479,7 @@ def get_input_fn(
   kwargs = dict(
       data_files=record_info["filenames"],
       num_hosts=num_hosts,
-      is_training=False,  # split == "train",
+      is_training=split == "train",
       max_length=max_length,
       use_bfloat16=use_bfloat16,
       **kwargs)

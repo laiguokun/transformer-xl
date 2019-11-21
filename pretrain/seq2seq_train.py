@@ -20,7 +20,7 @@ try:
 
   import google3.experimental.users.zihangd.pretrain.model_utils as model_utils
   import google3.experimental.users.zihangd.pretrain.optimization as optimization
-  import google3.experimental.users.zihangd.pretrain.model_func_builder as model_func_builder
+  import google3.experimental.users.zihangd.pretrain.seq2seq_model_func_builder as model_func_builder
   import google3.experimental.users.zihangd.pretrain.seq2seq_input_func_builder as input_func_builder
   from google3.experimental.users.zihangd.pretrain.tokenization import get_tokenizer
 
@@ -29,7 +29,7 @@ except ImportError as e:
   import tensorflow as tf
   import model_utils
   import optimization
-  import model_func_builder
+  import seq2seq_model_func_builder
   import seq2seq_input_func_builder as input_func_builder
   from tokenization import get_tokenizer
 

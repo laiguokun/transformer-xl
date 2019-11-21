@@ -174,6 +174,9 @@ def get_model_fn(n_token):
     elif FLAGS.loss_type == "mlm":
       total_loss, new_mems, monitor_dict = model_func_builder.mlm_loss(
           features, labels, mems, n_token, is_training)
+    elif FLAGS.loss_type == "xlnet":
+      total_loss, new_mems, monitor_dict = model_func_builder.xlnet_loss(
+          features, labels, mems, n_token, is_training)
     else:
       raise NotImplementedError
 

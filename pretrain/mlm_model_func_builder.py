@@ -12,11 +12,12 @@ import tensorflow as tf
 try:
   import google3.experimental.users.zihangd.pretrain.model as model
   from google3.experimental.users.zihangd.pretrain.model_utils import \
-      _get_initializer, _get_inp_func, _get_tfm_func, bf16_decorator
+      _get_initializer, _get_inp_func, _get_tfm_func, _get_xlnet_func, \
+      bf16_decorator
 except ImportError:
   import model
   from model_utils import _get_initializer, _get_inp_func, _get_tfm_func, \
-      bf16_decorator
+      _get_xlnet_func, bf16_decorator
 
 FLAGS = flags.FLAGS
 
@@ -244,5 +245,77 @@ def electra_loss(features, labels, mems, n_token, is_training):
     # accumulate total loss
     edit_coeff = 50
     total_loss = edit_coeff * edit_loss + gen_loss
+
+  return total_loss, {}, monitor_dict
+
+
+@bf16_decorator
+def xlnet_loss(features, labels, mems, n_token, is_training):
+  del labels
+  del mems
+
+  initializer = _get_initializer()
+
+  #### Unpack input
+  input_k = features["input_k"]
+  input_q = features["input_q"]
+
+  type_id_k = features["type_id_k"]
+  type_id_q = features["type_id_q"]
+
+  perm_mask_k = features["perm_mask_k"]
+  perm_mask_q = features["perm_mask_q"]
+
+  inputs = tf.concat([input_k, input_q], 1)
+  type_id = tf.concat([type_id_k, type_id_q], 1)
+  perm_mask = tf.concat([perm_mask_k, perm_mask_q], 1)
+
+  target_mapping = features["target_mapping"]
+  target_mask = features["target_mask"]
+  target = features["target"]
+
+  monitor_dict = {}
+
+  #### Transformer Model
+  with tf.variable_scope("model", reuse=tf.AUTO_REUSE):
+    inp_func = _get_inp_func(n_token,
+                             FLAGS.d_model,
+                             initializer,
+                             is_training)
+    input_embed, word_embed_table = inp_func(
+        inputs=inputs, type_id=type_id, return_embed_table=True)
+
+    xlnet_func = _get_xlnet_func(initializer, is_training)
+
+    _, output_q, _ = xlnet_func(
+        input_k=input_embed[:, :FLAGS.seq_len],
+        input_cat=input_embed,
+        mapping=target_mapping,
+        input_mask=None,
+        perm_mask=perm_mask)
+
+    lm_loss, _ = model.lm_loss(
+        hidden=output_q,
+        target=target,
+        n_token=n_token,
+        d_model=FLAGS.d_model,
+        initializer=initializer,
+        lookup_table=word_embed_table,
+        tie_weight=FLAGS.tie_weight,
+        target_mapping=None,
+        hidden_mapping=None,
+        return_logits=False,
+        use_tpu=FLAGS.use_tpu)
+
+    if lm_loss.dtype != tf.float32:
+      lm_loss = tf.cast(lm_loss, tf.float32)
+
+    if FLAGS.sample_strategy == "single_token":
+      total_loss = tf.reduce_mean(lm_loss)
+    else:
+      target_mask = tf.cast(target_mask, lm_loss.dtype)
+      total_loss = (tf.reduce_sum(lm_loss * target_mask) /
+                    tf.reduce_sum(target_mask))
+    monitor_dict["lm_loss"] = total_loss
 
   return total_loss, {}, monitor_dict

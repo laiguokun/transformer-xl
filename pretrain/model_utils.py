@@ -201,6 +201,28 @@ def _get_tfm_func(initializer, is_training, phase, shrink=1, **kwargs):
   return tfm_func
 
 
+def _get_xlnet_func(initializer, is_training, shrink=1, **kwargs):
+  """Prepare transformer function for two-stream xlnet loss."""
+  xlnet_args = dict(
+      n_layer=FLAGS.n_layer,
+      d_model=FLAGS.d_model // shrink,
+      n_head=FLAGS.n_head // shrink,
+      d_head=FLAGS.d_head,
+      d_inner=FLAGS.d_inner // shrink,
+      dropout=FLAGS.dropout,
+      dropatt=FLAGS.dropatt,
+      dropact=FLAGS.dropact,
+      ff_activation=FLAGS.ff_activation,
+      initializer=initializer,
+      is_training=is_training,
+      clamp_len=FLAGS.clamp_len,
+  )
+  xlnet_args.update(kwargs)
+  xlnet_func = functools.partial(model.xlnet, **xlnet_args)
+
+  return xlnet_func
+
+
 def extract_hiddens(inputs, type_id, n_token, is_training):
   """Extract all hidden states."""
   initializer = _get_initializer()
